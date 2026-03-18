@@ -257,7 +257,7 @@ impl KalshiMarketReader
     ) -> KalshiMarketReader
     {
         let (input_tx, mut input_rx) = unbounded_channel();
-        let (output_tx, output_rx) = unbounded_channel();
+        let (mut output_tx, output_rx) = unbounded_channel();
 
         let task_state = initial_state.clone();
 
@@ -277,6 +277,91 @@ impl KalshiMarketReader
 
             let rest_client: Client = Client::new();
             let mut web_socket: Option<WebSocketStream<MaybeTlsStream<TcpStream>>> = None;
+
+            fn handle_incoming_websocket_message(
+                message: String,
+                output_tx: &mut UnboundedSender<MarketStreamEvent>
+            )
+            {
+                // 1. Parse the raw JSON string
+                if let Ok(ws_msg) = serde_json::from_str::<KalshiWsMessage>(&message.to_string())
+                {
+                    match ws_msg
+                    {
+                        KalshiWsMessage::OrderbookSnapshot {
+                            msg, ..
+                        } =>
+                        {
+                            let mut snapshot: crate::OrderBookShares = [0; 100];
+
+                            // Map "Yes" asks to positive shares
+                            for [price_str, size_str] in msg.yes_dollars_fp
+                            {
+                                if let (Ok(price), Ok(size)) =
+                                    (price_str.parse::<f64>(), size_str.parse::<f64>())
+                                {
+                                    let cents = (price * 100.0).round() as usize;
+                                    if cents < 100
+                                    {
+                                        snapshot[cents] += size as i32;
+                                    }
+                                }
+                            }
+
+                            // Map "No" asks to negative shares
+                            for [price_str, size_str] in msg.no_dollars_fp
+                            {
+                                if let (Ok(price), Ok(size)) =
+                                    (price_str.parse::<f64>(), size_str.parse::<f64>())
+                                {
+                                    let cents = (price * 100.0).round() as usize;
+                                    if cents < 100
+                                    {
+                                        snapshot[cents] -= size as i32;
+                                    }
+                                }
+                            }
+
+                            let _ = output_tx.send(MarketStreamEvent::OrderbookSnapshot(snapshot));
+                        }
+                        KalshiWsMessage::OrderbookDelta {
+                            msg, ..
+                        } =>
+                        {
+                            if let (Ok(price), Ok(delta)) = (
+                                msg.price_dollars.parse::<f64>(),
+                                msg.delta_fp.parse::<f64>()
+                            )
+                            {
+                                let mut cents = (price * 100.0).round() as u8;
+
+                                // Assign sign based on side
+                                let size_delta = if msg.side == "yes"
+                                {
+                                    delta as i32
+                                }
+                                else
+                                {
+                                    -(delta as i32)
+                                };
+
+                                cents = cents.clamp(0, 99);
+
+                                let _ = output_tx.send(MarketStreamEvent::OrderbookDelta {
+                                    price_cents: cents,
+                                    size_delta
+                                });
+                            }
+                        }
+                        _ =>
+                        {} // Ignore Subscribed / Unknown messages
+                    }
+                }
+                else
+                {
+                    // Optional: log parse errors to a file for debugging
+                }
+            }
 
             loop
             {
@@ -303,7 +388,6 @@ impl KalshiMarketReader
                                         ).await.unwrap()
                                     );
 
-                                    // println!("connected web socket");
                                 }
                             },
                             MarketPollState::ActivelyTryingToResolve => {
@@ -348,9 +432,8 @@ impl KalshiMarketReader
                         match web_socket_message {
                             Some(Ok(message)) => {
 
-                                // println!("{}", message);
+                                handle_incoming_websocket_message(message.to_string(), &mut output_tx);
 
-                                // output_tx.send(message)
                             }
                             Some(Err(e)) => {
                                 let error_string = e.to_string();
@@ -393,4 +476,52 @@ impl KalshiMarketReader
     {
         &mut self.output_rx
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum KalshiWsMessage
+{
+    #[serde(rename = "subscribed")]
+    Subscribed
+    {
+        id: i64
+    },
+    #[serde(rename = "orderbook_snapshot")]
+    OrderbookSnapshot
+    {
+        sid: i64,
+        seq: i64,
+        msg: SnapshotMsg
+    },
+    #[serde(rename = "orderbook_delta")]
+    OrderbookDelta
+    {
+        sid: i64, seq: i64, msg: DeltaMsg
+    },
+    // Failsafe for unhandled Kalshi socket events (like heartbeats)
+    #[serde(other)]
+    Unknown
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SnapshotMsg
+{
+    pub market_ticker:  String,
+    pub market_id:      String,
+    // default handles the edge case where the orderbook is completely empty
+    #[serde(default)]
+    pub yes_dollars_fp: Vec<[String; 2]>,
+    #[serde(default)]
+    pub no_dollars_fp:  Vec<[String; 2]>
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeltaMsg
+{
+    pub market_ticker: String,
+    pub market_id:     String,
+    pub price_dollars: String,
+    pub delta_fp:      String,
+    pub side:          String // "yes" or "no"
 }

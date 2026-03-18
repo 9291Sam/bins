@@ -83,27 +83,6 @@ async fn main() -> std::io::Result<()>
         })
     };
 
-    // loop
-    // {
-    //     terminal.draw(|f| render_market(f, f.area(), &data))?;
-    // }
-
-    // println!("Hello, world!");
-
-    // let res = poll_nearby_markets(&Client::new(), Utc::now()).await;
-
-    // for r in &res
-    // {
-    //     println!("{:?}", r);
-    // }
-
-    // let ticker = res
-    //     .iter()
-    //     .find(|&r| r.status == KalshiMarketStatus::Active)
-    //     .unwrap();
-
-    // println!("selected ticker {}", ticker.ticker.0);
-
     struct MarketBundle
     {
         descriptor:   KalshiMarketDescriptor,
