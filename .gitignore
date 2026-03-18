@@ -1,0 +1,9 @@
+/target
+checks.json
+data.txt
+.vscode
+.env
+*.pem
+logs
+out.txt
+.DS_Store
