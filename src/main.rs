@@ -20,14 +20,12 @@ use tokio::time::interval;
 use crate::kalshi_communicator::{
     KalshiMarketDescriptor,
     KalshiMarketReader,
-    KalshiMarketStatus,
     MarketPollState,
     MarketStreamEvent,
     PreviousCurrentAndNextMarkets,
-    connect_ws,
-    poll_nearby_markets,
     poll_previous_current_and_next_market
 };
+use crate::orderbook::Orderbook;
 use crate::renderer::{MarketRenderData, render_market};
 
 mod kalshi_communicator;
@@ -43,8 +41,7 @@ pub const SAVING_INTERVAL_HZ: usize = 4;
 pub const DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE: usize =
     SAVING_INTERVAL_HZ * MARKET_INTERVAL_SECONDS;
 
-pub type OrderBookShares = [i32; 100];
-pub type CompleteOrderBookRecord = [OrderBookShares; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE];
+pub type CompleteOrderBookRecord = [Orderbook; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE];
 
 pub type DeltaHistory = [f64; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE];
 
@@ -57,39 +54,18 @@ async fn main() -> std::io::Result<()>
     let priv_key_path =
         env::var("KALSHI_PRIVATE_KEY_PATH").expect("Missing KALSHI_PRIVATE_KEY_PATH");
 
-    // enable_raw_mode()?;
-    // let mut stdout = std::io::stdout();
-    // crossterm::execute!(stdout, EnterAlternateScreen)?;
-    // let mut terminal: Terminal<CrosstermBackend<Stdout>> =
-    //     ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
-
-    let data = renderer::MarketRenderData::Active {
-        strike_price:          Some(1234.45),
-        current_bitcoin_price: 122334.3,
-        market_id:             "market id".into(),
-        time_untill_expiry:    chrono::Duration::minutes(12),
-        orderbook_shares:      [
-            -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100,
-            -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100,
-            -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100,
-            -100, -100, -100, -100, -100, -100, -100, -100, 0, 100, 100, 100, 100, 100, 100, 100,
-            100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
-            100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
-            100, 100, 100, 100, 100, 100, 100, 100
-        ],
-        delta_history:         std::array::from_fn(|idx| {
-            let unit_along = idx as f64 / DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE as f64;
-
-            (unit_along * 12.0).sin()
-        })
-    };
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    crossterm::execute!(stdout, EnterAlternateScreen)?;
+    let mut terminal: Terminal<CrosstermBackend<Stdout>> =
+        ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
 
     struct MarketBundle
     {
         descriptor:   KalshiMarketDescriptor,
         communicator: KalshiMarketReader,
 
-        orderbook:     OrderBookShares,
+        orderbook:     Orderbook,
         delta_history: DeltaHistory,
         final_price:   Option<f64>
     }
@@ -111,7 +87,7 @@ async fn main() -> std::io::Result<()>
                     priv_key_path
                 ),
                 descriptor,
-                orderbook: [0; 100],
+                orderbook: Orderbook::new(),
                 delta_history: [0.0; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE], // TODO: make nan
                 final_price: None
             }
@@ -126,9 +102,9 @@ async fn main() -> std::io::Result<()>
                     self.orderbook = new_orderbook
                 }
                 MarketStreamEvent::OrderbookDelta {
-                    price_cents,
+                    price_dollars,
                     size_delta
-                } => self.orderbook[price_cents as usize] += size_delta,
+                } => self.orderbook.add_shares(price_dollars, size_delta),
                 MarketStreamEvent::Resolved {
                     final_price
                 } => self.final_price = Some(final_price),
@@ -234,7 +210,7 @@ async fn main() -> std::io::Result<()>
                     current_bitcoin_price: mock_btc_price,
                     market_id:             bundle.descriptor.ticker.0.clone(),
                     time_untill_expiry:    bundle.descriptor.close_time - now,
-                    orderbook_shares:      bundle.orderbook,
+                    orderbook:             bundle.orderbook.clone(),
                     delta_history:         bundle.delta_history
                 }
             }
@@ -245,7 +221,7 @@ async fn main() -> std::io::Result<()>
                     estimate_final_bitcoin_price: mock_btc_price,
                     market_id:                    bundle.descriptor.ticker.0.clone(),
                     time_after_expiry:            now - bundle.descriptor.close_time,
-                    orderbook_shares:             bundle.orderbook,
+                    orderbook:                    bundle.orderbook.clone(),
                     delta_history:                bundle.delta_history
                 }
             }
@@ -306,7 +282,7 @@ async fn main() -> std::io::Result<()>
                     now,
                 ).await;
 
-                // tick_render_function(&mut terminal, &mut current, &mut previous, now).await;
+                tick_render_function(&mut terminal, &mut current, &mut previous, now).await;
 
             },
             Some(Ok(Event::Key(key))) = crossterm_events.next() => {
@@ -333,9 +309,9 @@ async fn main() -> std::io::Result<()>
         }
     }
 
-    // disable_raw_mode()?;
-    // crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    // terminal.show_cursor()?;
+    disable_raw_mode()?;
+    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
 
     Ok(())
 }

@@ -6,6 +6,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::orderbook::{Orderbook, index_to_dollars};
 use crate::{DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE, MARKET_INTERVAL_MINUTES};
 
 pub enum MarketRenderData
@@ -16,7 +17,7 @@ pub enum MarketRenderData
         current_bitcoin_price: f64,
         market_id:             String,
         time_untill_expiry:    chrono::Duration,
-        orderbook_shares:      crate::OrderBookShares,
+        orderbook:             Orderbook,
         delta_history:         crate::DeltaHistory
     },
     Resolving
@@ -25,7 +26,7 @@ pub enum MarketRenderData
         estimate_final_bitcoin_price: f64,
         market_id:                    String,
         time_after_expiry:            chrono::Duration,
-        orderbook_shares:             crate::OrderBookShares,
+        orderbook:                    Orderbook,
         delta_history:                crate::DeltaHistory
     },
     Resolved
@@ -277,145 +278,154 @@ fn render_header(frame: &mut Frame, area: Rect, data: &MarketRenderData)
 
 fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
 {
-    const ORDERBOOK_ELEMENTS_ON_EACH_SIDE_OF_SPREAD: usize = 8;
-
-    struct SharesAtPrice
+    let orderbook = match data
     {
-        price:  u8,
-        shares: i32
-    }
-
-    let (orderbook_shares_and_prices, spread_cents): (
-        [Option<SharesAtPrice>; ORDERBOOK_ELEMENTS_ON_EACH_SIDE_OF_SPREAD * 2],
-        u8
-    ) = {
-        let orderbook: &crate::OrderBookShares = match data
-        {
-            MarketRenderData::Active {
-                orderbook_shares, ..
-            } => orderbook_shares,
-            MarketRenderData::Resolving {
-                orderbook_shares, ..
-            } => orderbook_shares,
-            MarketRenderData::Resolved {
-                ..
-            } => return
-        };
-
-        let positive_min_index = orderbook
-            .iter()
-            .enumerate()
-            .filter(|(_, x)| **x >= 0)
-            .map(|(idx, _)| idx)
-            .next()
-            .unwrap();
-
-        let positive_max_index = (positive_min_index + ORDERBOOK_ELEMENTS_ON_EACH_SIDE_OF_SPREAD
-            - 1)
-        .min(orderbook.len() - 1);
-
-        let negative_max_index = orderbook
-            .iter()
-            .enumerate()
-            .filter(|(_, x)| **x <= 0)
-            .map(|(idx, _)| idx)
-            .next_back()
-            .unwrap();
-
-        let negative_min_index =
-            negative_max_index.saturating_sub(ORDERBOOK_ELEMENTS_ON_EACH_SIDE_OF_SPREAD - 1);
-
-        let positive_indices = positive_min_index..=positive_max_index;
-        let negative_indices = negative_min_index..=negative_max_index;
-
-        let spread_cents = positive_min_index.saturating_sub(negative_max_index);
-
-        let mut orderbook_shares_and_prices: [Option<SharesAtPrice>;
-            ORDERBOOK_ELEMENTS_ON_EACH_SIDE_OF_SPREAD * 2] = [const { None }; _];
-
-        for (i, positive_index) in positive_indices.enumerate()
-        {
-            orderbook_shares_and_prices[i + ORDERBOOK_ELEMENTS_ON_EACH_SIDE_OF_SPREAD] =
-                Some(SharesAtPrice {
-                    price:  positive_index as u8,
-                    shares: orderbook[positive_index]
-                });
-        }
-
-        for (i, negative_index) in negative_indices.enumerate()
-        {
-            orderbook_shares_and_prices[i] = Some(SharesAtPrice {
-                price:  negative_index as u8,
-                shares: orderbook[negative_index]
-            });
-        }
-
-        (orderbook_shares_and_prices, spread_cents as u8)
+        MarketRenderData::Active {
+            orderbook, ..
+        } => orderbook,
+        MarketRenderData::Resolving {
+            orderbook, ..
+        } => orderbook,
+        MarketRenderData::Resolved {
+            ..
+        } => return
     };
 
-    let mut shares_strings: Vec<Cow<'static, str>> = Vec::new();
-    shares_strings.reserve_exact(ORDERBOOK_ELEMENTS_ON_EACH_SIDE_OF_SPREAD * 2);
+    // Asks are derived from No Bids (Negative Shares in our array).
+    // We iterate forward (lowest price first) to find the best asks.
+    let mut asks: Vec<(f64, i32)> = orderbook
+        .data
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &shares)| {
+            if shares < 0
+            {
+                let cents = index_to_dollars(idx).unwrap_or(0.0) * 100.0;
+                Some((cents, shares.abs()))
+            }
+            else
+            {
+                None
+            }
+        })
+        .take(8)
+        .collect();
 
-    for e in orderbook_shares_and_prices.iter().rev()
+    // Reverse so the highest ask price is at the top of the terminal
+    asks.reverse();
+
+    // Bids are Yes Bids (Positive Shares).
+    // We iterate backwards (highest price first) to find the best bids.
+    let mut bids: Vec<(f64, i32)> = orderbook
+        .data
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(idx, &shares)| {
+            if shares > 0
+            {
+                let cents = index_to_dollars(idx).unwrap_or(0.0) * 100.0;
+                Some((cents, shares))
+            }
+            else
+            {
+                None
+            }
+        })
+        .take(8)
+        .collect();
+
+    let best_ask = asks.last().map(|(cents, _)| *cents);
+    let best_bid = bids.first().map(|(cents, _)| *cents);
+
+    let spread_s = match (best_ask, best_bid)
     {
-        match e
+        (Some(ask), Some(bid)) =>
         {
-            Some(SharesAtPrice {
-                price,
-                shares
-            }) => shares_strings.push(Cow::Owned(format!("{price}¢ │ {shares}",))),
-            None => shares_strings.push(Cow::Borrowed("--- │ ---"))
-        };
-    }
+            let spread = ask - bid;
+            if spread > 0.0
+            {
+                format!("{:>4.1}¢", spread)
+            }
+            else
+            {
+                " - ".to_string()
+            }
+        }
+        _ => " - ".to_string()
+    };
 
-    let mut lines: Vec<Line> = vec![
+    let empty = || {
         Line::from(Span::styled(
-            "Asks (Sell Yes / Buy No)",
+            "         - │ -                ",
+            Style::default().fg(Color::DarkGray)
+        ))
+    };
+    let separator = Line::from(Span::styled(
+        "───────────┼──────────────────",
+        Style::default().fg(Color::DarkGray)
+    ));
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "   ASKS (Sell YES / Buy NO)   ",
             Style::default().fg(Color::Red)
         )),
         Line::from(Span::styled(
-            "Price (¢) │ Shares",
-            Style::default().fg(Color::Red)
+            " Price (¢) │ Size             ",
+            Style::default().fg(Color::DarkGray)
         )),
+        separator.clone(),
     ];
 
-    for s in shares_strings
-        .iter()
-        .rev()
-        .take(ORDERBOOK_ELEMENTS_ON_EACH_SIDE_OF_SPREAD)
+    // Pad asks if there are fewer than 8
+    for _ in 0..8usize.saturating_sub(asks.len())
+    {
+        lines.push(empty());
+    }
+
+    // Render Asks
+    for (cents, shares) in &asks
     {
         lines.push(Line::from(Span::styled(
-            s.clone(),
+            format!("{:>9.1} │ {:<16}", cents, shares),
             Style::default().fg(Color::LightRed)
         )));
     }
 
+    // Render Spread
     lines.push(Line::from(Span::styled(
-        format!("─── Spread: {spread_cents}¢ ───"),
+        format!("── SPREAD: {:<5} ─────────────", spread_s),
         Style::default().fg(Color::Yellow)
     )));
 
-    for s in shares_strings
-        .iter()
-        .take(ORDERBOOK_ELEMENTS_ON_EACH_SIDE_OF_SPREAD)
-        .rev()
+    // Render Bids
+    for (cents, shares) in &bids
     {
         lines.push(Line::from(Span::styled(
-            s.clone(),
+            format!("{:>9.1} │ {:<16}", cents, shares),
             Style::default().fg(Color::LightGreen)
         )));
     }
 
+    // Pad bids if there are fewer than 8
+    for _ in 0..8usize.saturating_sub(bids.len())
+    {
+        lines.push(empty());
+    }
+
+    lines.push(separator);
     lines.push(Line::from(Span::styled(
-        "Asks (Sell No / Buy Yes)",
-        Style::default().fg(Color::Red)
+        "   BIDS (Buy YES / Sell NO)   ",
+        Style::default().fg(Color::Green)
     )));
 
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::White))
+                .border_style(Style::default().fg(Color::White)) /* Adjust this to match your
+                                                                  * border variable */
         ),
         area
     );
