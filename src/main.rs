@@ -31,6 +31,7 @@ use crate::kalshi_communicator::{
 use crate::renderer::{MarketRenderData, render_market};
 
 mod kalshi_communicator;
+mod orderbook;
 mod renderer;
 
 pub const MARKET_INTERVAL_MINUTES: usize = 15;
@@ -56,11 +57,11 @@ async fn main() -> std::io::Result<()>
     let priv_key_path =
         env::var("KALSHI_PRIVATE_KEY_PATH").expect("Missing KALSHI_PRIVATE_KEY_PATH");
 
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
-    let mut terminal: Terminal<CrosstermBackend<Stdout>> =
-        ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
+    // enable_raw_mode()?;
+    // let mut stdout = std::io::stdout();
+    // crossterm::execute!(stdout, EnterAlternateScreen)?;
+    // let mut terminal: Terminal<CrosstermBackend<Stdout>> =
+    //     ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
 
     let data = renderer::MarketRenderData::Active {
         strike_price:          Some(1234.45),
@@ -305,7 +306,7 @@ async fn main() -> std::io::Result<()>
                     now,
                 ).await;
 
-                tick_render_function(&mut terminal, &mut current, &mut previous, now).await;
+                // tick_render_function(&mut terminal, &mut current, &mut previous, now).await;
 
             },
             Some(Ok(Event::Key(key))) = crossterm_events.next() => {
@@ -332,9 +333,9 @@ async fn main() -> std::io::Result<()>
         }
     }
 
-    disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    // disable_raw_mode()?;
+    // crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    // terminal.show_cursor()?;
 
     Ok(())
 }

@@ -16,7 +16,7 @@ use rsa::pss::BlindedSigningKey;
 use rsa::rand_core::OsRng;
 use rsa::signature::{RandomizedSigner, SignatureEncoding};
 use serde::{Deserialize, Deserializer};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::Sha256;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -86,7 +86,9 @@ pub struct KalshiMarketDescriptor
     pub status:           KalshiMarketStatus,
     pub result:           Option<KalshiBinaryMarketResult>,
     #[serde(default, deserialize_with = "deserialize_optional_stringified_float")]
-    pub expiration_value: Option<f64>
+    pub expiration_value: Option<f64>,
+    pub price_level_structure: String,
+    pub price_ranges: Vec<Value>,
 }
 
 impl KalshiMarketDescriptor
@@ -125,8 +127,13 @@ pub async fn poll_previous_current_and_next_market(
         .map(|(idx, _)| idx)
         .expect("no market");
 
+
+
+    println!("{} | {:?}", markets[0].price_level_structure, markets[0].price_ranges);
+    
     let mut adjacent_markets =
         markets.drain(index_of_current_market - 1..=index_of_current_market + 1);
+
 
     PreviousCurrentAndNextMarkets {
         previous_market: adjacent_markets.next().unwrap(),
@@ -165,6 +172,7 @@ pub async fn poll_nearby_markets(
         .await
         .context("failed to parse market response into structure")
         .unwrap();
+
 
     response.markets
 }
@@ -283,84 +291,85 @@ impl KalshiMarketReader
                 output_tx: &mut UnboundedSender<MarketStreamEvent>
             )
             {
+                println!("{message}");
                 // 1. Parse the raw JSON string
-                if let Ok(ws_msg) = serde_json::from_str::<KalshiWsMessage>(&message.to_string())
-                {
-                    match ws_msg
-                    {
-                        KalshiWsMessage::OrderbookSnapshot {
-                            msg, ..
-                        } =>
-                        {
-                            let mut snapshot: crate::OrderBookShares = [0; 100];
+                // if let Ok(ws_msg) = serde_json::from_str::<KalshiWsMessage>(&message.to_string())
+                // {
+                //     match ws_msg
+                //     {
+                //         KalshiWsMessage::OrderbookSnapshot {
+                //             msg, ..
+                //         } =>
+                //         {
+                //             let mut snapshot: crate::OrderBookShares = [0; 100];
 
-                            // Map "Yes" asks to positive shares
-                            for [price_str, size_str] in msg.yes_dollars_fp
-                            {
-                                if let (Ok(price), Ok(size)) =
-                                    (price_str.parse::<f64>(), size_str.parse::<f64>())
-                                {
-                                    let cents = (price * 100.0).round() as usize;
-                                    if cents < 100
-                                    {
-                                        snapshot[cents] += size as i32;
-                                    }
-                                }
-                            }
+                //             // Map "Yes" asks to positive shares
+                //             for [price_str, size_str] in msg.yes_dollars_fp
+                //             {
+                //                 if let (Ok(price), Ok(size)) =
+                //                     (price_str.parse::<f64>(), size_str.parse::<f64>())
+                //                 {
+                //                     let cents = (price * 100.0).round() as usize;
+                //                     if cents < 100
+                //                     {
+                //                         snapshot[cents] += size as i32;
+                //                     }
+                //                 }
+                //             }
 
-                            // Map "No" asks to negative shares
-                            for [price_str, size_str] in msg.no_dollars_fp
-                            {
-                                if let (Ok(price), Ok(size)) =
-                                    (price_str.parse::<f64>(), size_str.parse::<f64>())
-                                {
-                                    let cents = (price * 100.0).round() as usize;
-                                    if cents < 100
-                                    {
-                                        snapshot[cents] -= size as i32;
-                                    }
-                                }
-                            }
+                //             // Map "No" asks to negative shares
+                //             for [price_str, size_str] in msg.no_dollars_fp
+                //             {
+                //                 if let (Ok(price), Ok(size)) =
+                //                     (price_str.parse::<f64>(), size_str.parse::<f64>())
+                //                 {
+                //                     let cents = (price * 100.0).round() as usize;
+                //                     if cents < 100
+                //                     {
+                //                         snapshot[cents] -= size as i32;
+                //                     }
+                //                 }
+                //             }
 
-                            let _ = output_tx.send(MarketStreamEvent::OrderbookSnapshot(snapshot));
-                        }
-                        KalshiWsMessage::OrderbookDelta {
-                            msg, ..
-                        } =>
-                        {
-                            if let (Ok(price), Ok(delta)) = (
-                                msg.price_dollars.parse::<f64>(),
-                                msg.delta_fp.parse::<f64>()
-                            )
-                            {
-                                let mut cents = (price * 100.0).round() as u8;
+                //             let _ = output_tx.send(MarketStreamEvent::OrderbookSnapshot(snapshot));
+                //         }
+                //         KalshiWsMessage::OrderbookDelta {
+                //             msg, ..
+                //         } =>
+                //         {
+                //             if let (Ok(price), Ok(delta)) = (
+                //                 msg.price_dollars.parse::<f64>(),
+                //                 msg.delta_fp.parse::<f64>()
+                //             )
+                //             {
+                //                 let mut cents = (price * 100.0).round() as u8;
 
-                                // Assign sign based on side
-                                let size_delta = if msg.side == "yes"
-                                {
-                                    delta as i32
-                                }
-                                else
-                                {
-                                    -(delta as i32)
-                                };
+                //                 // Assign sign based on side
+                //                 let size_delta = if msg.side == "yes"
+                //                 {
+                //                     delta as i32
+                //                 }
+                //                 else
+                //                 {
+                //                     -(delta as i32)
+                //                 };
 
-                                cents = cents.clamp(0, 99);
+                //                 cents = cents.clamp(0, 99);
 
-                                let _ = output_tx.send(MarketStreamEvent::OrderbookDelta {
-                                    price_cents: cents,
-                                    size_delta
-                                });
-                            }
-                        }
-                        _ =>
-                        {} // Ignore Subscribed / Unknown messages
-                    }
-                }
-                else
-                {
-                    // Optional: log parse errors to a file for debugging
-                }
+                //                 let _ = output_tx.send(MarketStreamEvent::OrderbookDelta {
+                //                     price_cents: cents,
+                //                     size_delta
+                //                 });
+                //             }
+                //         }
+                //         _ =>
+                //         {} // Ignore Subscribed / Unknown messages
+                //     }
+                // }
+                // else
+                // {
+                //     // Optional: log parse errors to a file for debugging
+                // }
             }
 
             loop
