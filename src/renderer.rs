@@ -305,7 +305,7 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         let positive_min_index = orderbook
             .iter()
             .enumerate()
-            .filter(|(_, x)| **x > 0)
+            .filter(|(_, x)| **x >= 0)
             .map(|(idx, _)| idx)
             .next()
             .unwrap();
@@ -317,7 +317,7 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         let negative_max_index = orderbook
             .iter()
             .enumerate()
-            .filter(|(_, x)| **x < 0)
+            .filter(|(_, x)| **x <= 0)
             .map(|(idx, _)| idx)
             .next_back()
             .unwrap();
