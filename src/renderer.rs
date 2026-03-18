@@ -316,7 +316,7 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
 
     // Bids are Yes Bids (Positive Shares).
     // We iterate backwards (highest price first) to find the best bids.
-    let mut bids: Vec<(f64, i32)> = orderbook
+    let bids: Vec<(f64, i32)> = orderbook
         .data
         .iter()
         .enumerate()

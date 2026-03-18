@@ -129,10 +129,10 @@ pub async fn poll_previous_current_and_next_market(
         .map(|(idx, _)| idx)
         .expect("no market");
 
-    println!(
-        "{} | {:?}",
-        markets[0].price_level_structure, markets[0].price_ranges
-    );
+    // println!(
+    //     "{} | {:?}",
+    //     markets[0].price_level_structure, markets[0].price_ranges
+    // );
 
     let mut adjacent_markets =
         markets.drain(index_of_current_market - 1..=index_of_current_market + 1);
