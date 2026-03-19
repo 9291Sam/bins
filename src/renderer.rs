@@ -6,8 +6,13 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::orderbook::{Orderbook, index_to_dollars};
-use crate::{DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE, MARKET_INTERVAL_MINUTES};
+use crate::shared::{
+    DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE,
+    DeltaHistory,
+    MARKET_INTERVAL_MINUTES,
+    Orderbook,
+    index_to_dollars
+};
 
 pub enum MarketRenderData
 {
@@ -18,7 +23,7 @@ pub enum MarketRenderData
         market_id:             String,
         time_untill_expiry:    chrono::Duration,
         orderbook:             Orderbook,
-        delta_history:         crate::DeltaHistory
+        delta_history:         DeltaHistory
     },
     Resolving
     {
@@ -27,14 +32,14 @@ pub enum MarketRenderData
         market_id:                    String,
         time_after_expiry:            chrono::Duration,
         orderbook:                    Orderbook,
-        delta_history:                crate::DeltaHistory
+        delta_history:                DeltaHistory
     },
     Resolved
     {
         strike_price:        Option<f64>,
         final_bitcoin_price: f64,
         market_id:           String,
-        delta_history:       crate::DeltaHistory
+        delta_history:       DeltaHistory
     }
 }
 
@@ -72,7 +77,7 @@ impl MarketRenderData
         }
     }
 
-    pub fn get_delta_history(&self) -> &crate::DeltaHistory
+    pub fn get_delta_history(&self) -> &DeltaHistory
     {
         match self
         {
@@ -145,7 +150,7 @@ fn render_header(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         MarketRenderData::Active {
             current_bitcoin_price,
             ..
-        } => format!(" Live Bitcoin Price: ${current_bitcoin_price}"),
+        } => format!(" Live Bitcoin Price: ${current_bitcoin_price:.2}"),
         MarketRenderData::Resolving {
             estimate_final_bitcoin_price,
             ..

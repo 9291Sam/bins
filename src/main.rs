@@ -17,33 +17,20 @@ use ratatui::prelude::CrosstermBackend;
 use reqwest::Client;
 use tokio::time::interval;
 
+use crate::kalshi_bitcoin_price_grabber::{BitcoinPriceGrabber, BitcoinPriceUpdate};
 use crate::kalshi_communicator::{
-    KalshiMarketDescriptor,
-    KalshiMarketReader,
     MarketPollState,
     MarketStreamEvent,
     PreviousCurrentAndNextMarkets,
     poll_previous_current_and_next_market
 };
-use crate::orderbook::Orderbook;
 use crate::renderer::{MarketRenderData, render_market};
+use crate::shared::MarketBundle;
 
+mod kalshi_bitcoin_price_grabber;
 mod kalshi_communicator;
-mod orderbook;
 mod renderer;
-
-pub const MARKET_INTERVAL_MINUTES: usize = 15;
-pub const MARKET_INTERVAL_SECONDS: usize = MARKET_INTERVAL_MINUTES * 60;
-
-pub const SCREEN_UPDATES_HZ: usize = 60;
-pub const SAVING_INTERVAL_HZ: usize = 4;
-
-pub const DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE: usize =
-    SAVING_INTERVAL_HZ * MARKET_INTERVAL_SECONDS;
-
-pub type CompleteOrderBookRecord = [Orderbook; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE];
-
-pub type DeltaHistory = [f64; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE];
+mod shared;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()>
@@ -59,59 +46,6 @@ async fn main() -> std::io::Result<()>
     crossterm::execute!(stdout, EnterAlternateScreen)?;
     let mut terminal: Terminal<CrosstermBackend<Stdout>> =
         ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
-
-    struct MarketBundle
-    {
-        descriptor:   KalshiMarketDescriptor,
-        communicator: KalshiMarketReader,
-
-        orderbook:     Orderbook,
-        delta_history: DeltaHistory,
-        final_price:   Option<f64>
-    }
-
-    impl MarketBundle
-    {
-        pub fn new(
-            descriptor: KalshiMarketDescriptor,
-            state: MarketPollState,
-            api_key_id: String,
-            priv_key_path: String
-        ) -> MarketBundle
-        {
-            MarketBundle {
-                communicator: KalshiMarketReader::new(
-                    descriptor.ticker.clone(),
-                    state,
-                    api_key_id,
-                    priv_key_path
-                ),
-                descriptor,
-                orderbook: Orderbook::new(),
-                delta_history: [0.0; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE], // TODO: make nan
-                final_price: None
-            }
-        }
-
-        pub fn apply_event(&mut self, event: MarketStreamEvent)
-        {
-            match event
-            {
-                MarketStreamEvent::OrderbookSnapshot(new_orderbook) =>
-                {
-                    self.orderbook = new_orderbook
-                }
-                MarketStreamEvent::OrderbookDelta {
-                    price_dollars,
-                    size_delta
-                } => self.orderbook.add_shares(price_dollars, size_delta),
-                MarketStreamEvent::Resolved {
-                    final_price
-                } => self.final_price = Some(final_price),
-                MarketStreamEvent::FatalNetworkError(_) => todo!()
-            }
-        }
-    }
 
     let (mut next, mut current, mut previous) = {
         let PreviousCurrentAndNextMarkets {
@@ -194,7 +128,8 @@ async fn main() -> std::io::Result<()>
     fn create_render_data_from_bundle(
         bundle: &MarketBundle,
         now: DateTime<Utc>,
-        mock_btc_price: f64 // Pass in your real BTC feed here later
+        real_bitcoin_price: f64,
+        approximated_bitcoin_price: f64
     ) -> MarketRenderData
     {
         let state = bundle.communicator.get_poll_state();
@@ -207,7 +142,7 @@ async fn main() -> std::io::Result<()>
             {
                 MarketRenderData::Active {
                     strike_price:          bundle.descriptor.strike_price,
-                    current_bitcoin_price: mock_btc_price,
+                    current_bitcoin_price: real_bitcoin_price,
                     market_id:             bundle.descriptor.ticker.0.clone(),
                     time_untill_expiry:    bundle.descriptor.close_time - now,
                     orderbook:             bundle.orderbook.clone(),
@@ -218,7 +153,7 @@ async fn main() -> std::io::Result<()>
             {
                 MarketRenderData::Resolving {
                     strike_price:                 bundle.descriptor.strike_price,
-                    estimate_final_bitcoin_price: mock_btc_price,
+                    estimate_final_bitcoin_price: real_bitcoin_price,
                     market_id:                    bundle.descriptor.ticker.0.clone(),
                     time_after_expiry:            now - bundle.descriptor.close_time,
                     orderbook:                    bundle.orderbook.clone(),
@@ -229,7 +164,7 @@ async fn main() -> std::io::Result<()>
             {
                 MarketRenderData::Resolved {
                     strike_price:        bundle.descriptor.strike_price,
-                    final_bitcoin_price: bundle.final_price.unwrap_or(mock_btc_price),
+                    final_bitcoin_price: bundle.final_price.unwrap(),
                     market_id:           bundle.descriptor.ticker.0.clone(),
                     delta_history:       bundle.delta_history
                 }
@@ -241,7 +176,9 @@ async fn main() -> std::io::Result<()>
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
         current: &mut MarketBundle,
         previous: &mut MarketBundle,
-        now: DateTime<Utc>
+        now: DateTime<Utc>,
+        real_bitcoin_price: f64,
+        approximated_bitcoin_price: f64
     )
     {
         terminal
@@ -254,18 +191,32 @@ async fn main() -> std::io::Result<()>
                 render_market(
                     frame,
                     columns[0],
-                    &create_render_data_from_bundle(current, now, 69420.0)
+                    &create_render_data_from_bundle(
+                        current,
+                        now,
+                        real_bitcoin_price,
+                        approximated_bitcoin_price
+                    )
                 );
                 render_market(
                     frame,
                     columns[1],
-                    &create_render_data_from_bundle(previous, now, 69420.0)
+                    &create_render_data_from_bundle(
+                        previous,
+                        now,
+                        real_bitcoin_price,
+                        approximated_bitcoin_price
+                    )
                 );
             })
             .unwrap();
     }
 
     let mut crossterm_events = EventStream::new();
+    let mut real_bitcoin_price: f64 = 0.0;
+    let mut approximated_bitcoin_price: f64 = 0.0;
+
+    let mut bitcoin_price_grabber = BitcoinPriceGrabber::new();
 
     loop
     {
@@ -282,7 +233,14 @@ async fn main() -> std::io::Result<()>
                     now,
                 ).await;
 
-                tick_render_function(&mut terminal, &mut current, &mut previous, now).await;
+                tick_render_function(
+                    &mut terminal,
+                    &mut current,
+                    &mut previous,
+                    now,
+                    real_bitcoin_price,
+                    approximated_bitcoin_price
+                ).await;
 
             },
             Some(Ok(Event::Key(key))) = crossterm_events.next() => {
@@ -302,8 +260,14 @@ async fn main() -> std::io::Result<()>
                     previous.communicator.set_poll_state(MarketPollState::Resolved);
                 }
 
-
                 previous.apply_event(e);
+            }
+            Some(u) = bitcoin_price_grabber.get_receiver().recv() => {
+                match u
+                {
+                    BitcoinPriceUpdate::Official(o) => real_bitcoin_price = o,
+                    BitcoinPriceUpdate::Approximated(a) => approximated_bitcoin_price = a,
+                }
             }
 
         }

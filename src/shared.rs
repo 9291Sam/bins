@@ -1,5 +1,25 @@
 use anyhow::Context;
 
+use crate::kalshi_communicator::{
+    KalshiMarketDescriptor,
+    KalshiMarketReader,
+    MarketPollState,
+    MarketStreamEvent
+};
+
+pub const MARKET_INTERVAL_MINUTES: usize = 15;
+pub const MARKET_INTERVAL_SECONDS: usize = MARKET_INTERVAL_MINUTES * 60;
+
+pub const SCREEN_UPDATES_HZ: usize = 60;
+pub const SAVING_INTERVAL_HZ: usize = 4;
+
+pub const DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE: usize =
+    SAVING_INTERVAL_HZ * MARKET_INTERVAL_SECONDS;
+
+pub type CompleteOrderBookRecord = [Orderbook; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE];
+
+pub type DeltaHistory = [f64; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE];
+
 /// Tapered-deci-cent#
 #[derive(Clone)]
 pub struct Orderbook
@@ -84,5 +104,54 @@ pub fn index_to_dollars(idx: usize) -> Option<f64>
         101..=179 => Some(0.110 + ((idx - 101) as f64 / 100.0)),
         180..=280 => Some(0.900 + ((idx - 180) as f64 / 1000.0)),
         _ => None
+    }
+}
+
+pub struct MarketBundle
+{
+    pub descriptor:   KalshiMarketDescriptor,
+    pub communicator: KalshiMarketReader,
+
+    pub orderbook:     Orderbook,
+    pub delta_history: DeltaHistory,
+    pub final_price:   Option<f64>
+}
+
+impl MarketBundle
+{
+    pub fn new(
+        descriptor: KalshiMarketDescriptor,
+        state: MarketPollState,
+        api_key_id: String,
+        priv_key_path: String
+    ) -> MarketBundle
+    {
+        MarketBundle {
+            communicator: KalshiMarketReader::new(
+                descriptor.ticker.clone(),
+                state,
+                api_key_id,
+                priv_key_path
+            ),
+            descriptor,
+            orderbook: Orderbook::new(),
+            delta_history: [0.0; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE], // TODO: make nan
+            final_price: None
+        }
+    }
+
+    pub fn apply_event(&mut self, event: MarketStreamEvent)
+    {
+        match event
+        {
+            MarketStreamEvent::OrderbookSnapshot(new_orderbook) => self.orderbook = new_orderbook,
+            MarketStreamEvent::OrderbookDelta {
+                price_dollars,
+                size_delta
+            } => self.orderbook.add_shares(price_dollars, size_delta),
+            MarketStreamEvent::Resolved {
+                final_price
+            } => self.final_price = Some(final_price)
+        }
     }
 }
