@@ -1,4 +1,3 @@
-const MARKETS_REST_API: &str = "https://api.elections.kalshi.com/trade-api/v2/markets";
 const TRADE_API_SOCKET: &str = "wss://api.elections.kalshi.com/trade-api/ws/v2";
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -26,240 +25,9 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use super::*;
+use crate::kalshi::{KalshiMarketDescriptor, MarketTicker};
 use crate::shared::Orderbook;
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum KalshiMarketStatus
-{
-    #[serde(rename = "initialized")]
-    Initialized,
-    #[serde(rename = "inactive")]
-    Inactive,
-    #[serde(rename = "active")]
-    Active,
-    #[serde(rename = "closed")]
-    Closed,
-    #[serde(rename = "determined")]
-    Determined,
-    #[serde(rename = "disputed")]
-    Disputed,
-    #[serde(rename = "amended")]
-    Amended,
-    #[serde(rename = "finalized")]
-    Finalized
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub enum KalshiBinaryMarketResult
-{
-    #[serde(rename = "yes")]
-    Yes,
-    #[serde(rename = "no")]
-    No,
-    #[serde(rename = "")]
-    Unresolved
-}
-
-fn deserialize_optional_stringified_float<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
-where
-    D: Deserializer<'de>
-{
-    match Option::<String>::deserialize(deserializer)?
-    {
-        Some(s) if s.is_empty() => Ok(None),
-        Some(s) => s.parse::<f64>().map(Some).map_err(serde::de::Error::custom),
-        None => Ok(None)
-    }
-}
-
-fn deserialize_stringified_float<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: Deserializer<'de>
-{
-    match &*String::deserialize(deserializer)?
-    {
-        "" => Err(serde::de::Error::custom("")),
-        s => s.parse::<f64>().map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(transparent)]
-#[serde(transparent)]
-pub struct MarketTicker(pub String);
-
-// https://docs.kalshi.com/api-reference/market/get-market
-#[derive(Debug, Clone, Deserialize)]
-pub struct KalshiMarketDescriptor
-{
-    pub ticker:                MarketTicker,
-    #[serde(rename = "floor_strike")]
-    pub strike_price:          Option<f64>,
-    pub close_time:            DateTime<Utc>,
-    pub status:                KalshiMarketStatus,
-    pub result:                Option<KalshiBinaryMarketResult>,
-    #[serde(default, deserialize_with = "deserialize_optional_stringified_float")]
-    pub expiration_value:      Option<f64>,
-    pub price_level_structure: String,
-    pub price_ranges:          Vec<Value>
-}
-
-impl KalshiMarketDescriptor
-{
-    pub fn get_start_time(&self) -> DateTime<Utc>
-    {
-        self.close_time - Duration::from_mins(15)
-    }
-}
-
-pub struct PreviousCurrentAndNextMarkets
-{
-    pub next_market:     KalshiMarketDescriptor,
-    pub current_market:  KalshiMarketDescriptor,
-    pub previous_market: KalshiMarketDescriptor
-}
-
-pub async fn poll_previous_current_and_next_market(
-    client: &Client,
-    target_time: DateTime<Utc>
-) -> PreviousCurrentAndNextMarkets
-{
-    let mut markets = poll_nearby_markets(client, target_time).await;
-
-    markets.sort_by_key(|l| l.close_time);
-
-    let index_of_current_market = markets
-        .iter()
-        .enumerate()
-        .find(|(_, m)| {
-            let close_time = m.close_time;
-            let start_time = close_time - Duration::from_mins(15);
-
-            (start_time..close_time).contains(&target_time)
-        })
-        .map(|(idx, _)| idx)
-        .expect("no market");
-
-    // println!(
-    //     "{} | {:?}",
-    //     markets[0].price_level_structure, markets[0].price_ranges
-    // );
-
-    let mut adjacent_markets =
-        markets.drain(index_of_current_market - 1..=index_of_current_market + 1);
-
-    PreviousCurrentAndNextMarkets {
-        previous_market: adjacent_markets.next().unwrap(),
-        current_market:  adjacent_markets.next().unwrap(),
-        next_market:     adjacent_markets.next().unwrap()
-    }
-}
-
-pub async fn poll_nearby_markets(
-    client: &Client,
-    target_time: DateTime<Utc>
-) -> Vec<KalshiMarketDescriptor>
-{
-    let min_time = target_time - Duration::from_mins(30);
-    let max_time = target_time + Duration::from_mins(30);
-
-    #[derive(Debug, Deserialize)]
-    struct KalshiMarketPollResult
-    {
-        markets: Vec<KalshiMarketDescriptor>
-    }
-
-    let response: KalshiMarketPollResult = client
-        .get(MARKETS_REST_API)
-        .query(&[
-            ("series_ticker", "KXBTC15M"),
-            ("min_close_ts", &min_time.timestamp().to_string()),
-            ("max_close_ts", &max_time.timestamp().to_string()),
-            ("limit", "10")
-        ])
-        .send()
-        .await
-        .context("Failed to send HTTP request to Kalshi")
-        .unwrap()
-        .json()
-        .await
-        .context("failed to parse market response into structure")
-        .unwrap();
-
-    response.markets
-}
-
-pub async fn connect_ws(
-    tickers: &[String],
-    api_key_id: &str,
-    priv_key_path: &str
-) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>>
-{
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_millis()
-        .to_string();
-    let private_key = RsaPrivateKey::read_pkcs1_pem_file(priv_key_path).context("Bad RSA key")?;
-    let signature = BlindedSigningKey::<Sha256>::new(private_key).sign_with_rng(
-        &mut OsRng,
-        format!("{}GET/trade-api/ws/v2", timestamp).as_bytes()
-    );
-
-    let mut req = TRADE_API_SOCKET.into_client_request()?;
-    let h = req.headers_mut();
-    h.insert("KALSHI-ACCESS-KEY", HeaderValue::from_str(api_key_id)?);
-    h.insert(
-        "KALSHI-ACCESS-SIGNATURE",
-        HeaderValue::from_str(&BASE64.encode(signature.to_vec()))?
-    );
-    h.insert(
-        "KALSHI-ACCESS-TIMESTAMP",
-        HeaderValue::from_str(&timestamp)?
-    );
-
-    let (mut ws, _) = connect_async(req).await.context("WS connect failed")?;
-    ws.send(Message::Text(
-        json!({
-            "id": 1,
-            "cmd": "subscribe",
-            "params": {
-                "channels": ["orderbook_delta"],
-                "market_tickers": tickers
-            }
-        })
-        .to_string()
-        .into()
-    ))
-    .await?;
-    Ok(ws)
-}
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MarketPollState
-{
-    FarBeforeActive,   // in the 30 minutes before a market becomes active,
-    RightBeforeActive, // in the 30 seconds before a market becomes active,
-    Active,            // The market is active,
-    ActivelyTryingToResolve, /* the market has finished and so has trading, we are trying to
-                        * figure out what the final strike price is */
-    Resolved
-}
-
-#[allow(clippy::large_enum_variant)]
-pub enum MarketStreamEvent
-{
-    OrderbookSnapshot(Orderbook),
-    OrderbookDelta
-    {
-        price_dollars: f64,
-        size_delta:    i32
-    },
-    Resolved
-    {
-        final_price: f64
-    } // LiveExchangePrice(f64)
-}
-
 pub struct KalshiMarketReader
 {
     state_cache: MarketPollState,
@@ -399,7 +167,7 @@ impl KalshiMarketReader
 
                                     let now = Utc::now();
 
-                                    let nearby_markets = poll_nearby_markets(
+                                    let nearby_markets = super::poll_nearby_markets(
                                         &rest_client, now
                                     ).await;
 
@@ -408,15 +176,11 @@ impl KalshiMarketReader
                                         .find(|m| m.ticker == ticker)
                                         .unwrap();
 
-                                    if let Some(strike_price) =
-                                        this_market_current_data.strike_price
-                                    {
+
                                         output_tx.send(
-                                            MarketStreamEvent::Resolved {
-                                                final_price: strike_price
-                                            }
+                                            MarketStreamEvent::NewDescriptors(nearby_markets)
                                         ).unwrap();
-                                    }
+
 
                                 }
                             },
@@ -526,9 +290,77 @@ struct DeltaMsg
 {
     // pub market_ticker: String,
     // pub market_id:     String,
-    #[serde(default, deserialize_with = "deserialize_stringified_float")]
+    #[serde(default, deserialize_with = "super::deserialize_stringified_float")]
     pub price_dollars: f64,
-    #[serde(default, deserialize_with = "deserialize_stringified_float")]
+    #[serde(default, deserialize_with = "super::deserialize_stringified_float")]
     pub delta_fp:      f64,
     pub side:          KalshiMarketSide
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MarketPollState
+{
+    FarBeforeActive,   // in the 30 minutes before a market becomes active,
+    RightBeforeActive, // in the 30 seconds before a market becomes active,
+    Active,            // The market is active,
+    ActivelyTryingToResolve, /* the market has finished and so has trading, we are trying to
+                        * figure out what the final strike price is */
+    Resolved
+}
+
+#[allow(clippy::large_enum_variant)]
+pub enum MarketStreamEvent
+{
+    OrderbookSnapshot(Orderbook),
+    OrderbookDelta
+    {
+        price_dollars: f64,
+        size_delta:    i32
+    },
+    NewDescriptors(Vec<KalshiMarketDescriptor>)
+}
+
+pub async fn connect_ws(
+    tickers: &[String],
+    api_key_id: &str,
+    priv_key_path: &str
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>>
+{
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_millis()
+        .to_string();
+    let private_key = RsaPrivateKey::read_pkcs1_pem_file(priv_key_path).context("Bad RSA key")?;
+    let signature = BlindedSigningKey::<Sha256>::new(private_key).sign_with_rng(
+        &mut OsRng,
+        format!("{}GET/trade-api/ws/v2", timestamp).as_bytes()
+    );
+
+    let mut req = TRADE_API_SOCKET.into_client_request()?;
+    let h = req.headers_mut();
+    h.insert("KALSHI-ACCESS-KEY", HeaderValue::from_str(api_key_id)?);
+    h.insert(
+        "KALSHI-ACCESS-SIGNATURE",
+        HeaderValue::from_str(&BASE64.encode(signature.to_vec()))?
+    );
+    h.insert(
+        "KALSHI-ACCESS-TIMESTAMP",
+        HeaderValue::from_str(&timestamp)?
+    );
+
+    let (mut ws, _) = connect_async(req).await.context("WS connect failed")?;
+    ws.send(Message::Text(
+        json!({
+            "id": 1,
+            "cmd": "subscribe",
+            "params": {
+                "channels": ["orderbook_delta"],
+                "market_tickers": tickers
+            }
+        })
+        .to_string()
+        .into()
+    ))
+    .await?;
+    Ok(ws)
 }

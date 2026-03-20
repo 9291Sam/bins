@@ -1,10 +1,15 @@
-use anyhow::Context;
+use std::time::Duration;
 
-use crate::kalshi_communicator::{
+use anyhow::Context;
+use chrono::{DateTime, Utc};
+
+use crate::kalshi::{
     KalshiMarketDescriptor,
     KalshiMarketReader,
+    KalshiMarketStatus,
     MarketPollState,
-    MarketStreamEvent
+    MarketStreamEvent,
+    MarketTicker
 };
 
 pub const MARKET_INTERVAL_MINUTES: usize = 15;
@@ -109,12 +114,16 @@ pub fn index_to_dollars(idx: usize) -> Option<f64>
 
 pub struct MarketBundle
 {
-    pub descriptor:   KalshiMarketDescriptor,
     pub communicator: KalshiMarketReader,
 
     pub orderbook:     Orderbook,
     pub delta_history: DeltaHistory,
-    pub final_price:   Option<f64>
+
+    pub ticker:       MarketTicker,
+    pub close_time:   DateTime<Utc>,
+    pub strike_price: Option<f64>,
+    pub final_price:  Option<f64>,
+    pub status:       KalshiMarketStatus
 }
 
 impl MarketBundle
@@ -127,20 +136,37 @@ impl MarketBundle
     ) -> MarketBundle
     {
         MarketBundle {
-            communicator: KalshiMarketReader::new(
+            communicator:  KalshiMarketReader::new(
                 descriptor.ticker.clone(),
                 state,
                 api_key_id,
                 priv_key_path
             ),
-            descriptor,
-            orderbook: Orderbook::new(),
+            orderbook:     Orderbook::new(),
             delta_history: vec![0.0; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]
                 .into_boxed_slice()
                 .try_into()
                 .unwrap(),
-            final_price: None
+            ticker:        descriptor.ticker,
+            close_time:    descriptor.close_time,
+            strike_price:  descriptor.strike_price,
+            final_price:   descriptor.expiration_value,
+            status:        descriptor.status
         }
+    }
+
+    pub fn update_with_new_descriptor(&mut self, descriptor: KalshiMarketDescriptor)
+    {
+        self.ticker = descriptor.ticker;
+        self.close_time = descriptor.close_time;
+        self.strike_price = descriptor.strike_price;
+        self.final_price = descriptor.expiration_value;
+        self.status = descriptor.status;
+    }
+
+    pub fn get_start_time(&self) -> DateTime<Utc>
+    {
+        self.close_time - Duration::from_mins(15)
     }
 
     pub fn apply_event(&mut self, event: MarketStreamEvent)
@@ -152,9 +178,16 @@ impl MarketBundle
                 price_dollars,
                 size_delta
             } => self.orderbook.add_shares(price_dollars, size_delta),
-            MarketStreamEvent::Resolved {
-                final_price
-            } => self.final_price = Some(final_price)
+            MarketStreamEvent::NewDescriptors(descriptors) =>
+            {
+                for d in descriptors.into_iter()
+                {
+                    if d.ticker == self.ticker
+                    {
+                        self.update_with_new_descriptor(d);
+                    }
+                }
+            }
         }
     }
 }

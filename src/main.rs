@@ -11,31 +11,32 @@ use crossterm::terminal::{
     enable_raw_mode
 };
 use futures_util::StreamExt;
+use kalshi::{
+    BitcoinPriceGrabber,
+    BitcoinPriceUpdate,
+    MarketPollState,
+    MarketStreamEvent,
+    PreviousCurrentAndNextMarkets,
+    poll_previous_current_and_next_market
+};
 use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::prelude::CrosstermBackend;
 use reqwest::Client;
 use tokio::time::interval;
 
-use crate::kalshi_bitcoin_price_grabber::{BitcoinPriceGrabber, BitcoinPriceUpdate};
-use crate::kalshi_communicator::{
-    MarketPollState,
-    MarketStreamEvent,
-    PreviousCurrentAndNextMarkets,
-    poll_previous_current_and_next_market
-};
+use crate::kalshi::KalshiMarketStatus;
 use crate::renderer::{MarketRenderData, render_market};
 use crate::shared::MarketBundle;
 
-mod kalshi_bitcoin_price_grabber;
-mod kalshi_communicator;
+mod kalshi;
 mod renderer;
 mod shared;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()>
 {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     let api_key_id = env::var("KALSHI_API_KEY_ID").expect("Missing KALSHI_API_KEY_ID");
     let priv_key_path =
@@ -90,13 +91,13 @@ async fn main() -> std::io::Result<()>
     )
     {
         if next.communicator.get_poll_state() == MarketPollState::FarBeforeActive
-            && now - next.descriptor.get_start_time() < TimeDelta::seconds(30)
+            && now - next.get_start_time() < TimeDelta::seconds(30)
         {
             next.communicator
                 .set_poll_state(MarketPollState::RightBeforeActive);
         }
 
-        if (now - current.descriptor.close_time) > TimeDelta::zero()
+        if (now - current.close_time) > TimeDelta::zero()
         {
             let new_next_descriptor = poll_previous_current_and_next_market(&Client::new(), now)
                 .await
@@ -123,6 +124,18 @@ async fn main() -> std::io::Result<()>
                 .communicator
                 .set_poll_state(MarketPollState::ActivelyTryingToResolve);
         }
+
+        if previous.communicator.get_poll_state() == MarketPollState::ActivelyTryingToResolve
+        {
+            if previous.status == KalshiMarketStatus::Determined
+                || previous.status == KalshiMarketStatus::Finalized
+            {
+                // TODO: make these statuses more fine grained
+                previous
+                    .communicator
+                    .set_poll_state(MarketPollState::Resolved);
+            }
+        }
     }
 
     fn create_render_data_from_bundle(
@@ -141,10 +154,10 @@ async fn main() -> std::io::Result<()>
             | MarketPollState::FarBeforeActive =>
             {
                 MarketRenderData::Active {
-                    strike_price:          bundle.descriptor.strike_price,
+                    strike_price:          bundle.strike_price,
                     current_bitcoin_price: real_bitcoin_price,
-                    market_id:             bundle.descriptor.ticker.0.clone(),
-                    time_untill_expiry:    bundle.descriptor.close_time - now,
+                    market_id:             bundle.ticker.0.clone(),
+                    time_untill_expiry:    bundle.close_time - now,
                     orderbook:             bundle.orderbook.clone(),
                     delta_history:         &bundle.delta_history
                 }
@@ -152,10 +165,10 @@ async fn main() -> std::io::Result<()>
             MarketPollState::ActivelyTryingToResolve =>
             {
                 MarketRenderData::Resolving {
-                    strike_price:                 bundle.descriptor.strike_price,
+                    strike_price:                 bundle.strike_price,
                     estimate_final_bitcoin_price: real_bitcoin_price,
-                    market_id:                    bundle.descriptor.ticker.0.clone(),
-                    time_after_expiry:            now - bundle.descriptor.close_time,
+                    market_id:                    bundle.ticker.0.clone(),
+                    time_after_expiry:            now - bundle.close_time,
                     orderbook:                    bundle.orderbook.clone(),
                     delta_history:                &bundle.delta_history
                 }
@@ -163,9 +176,9 @@ async fn main() -> std::io::Result<()>
             MarketPollState::Resolved =>
             {
                 MarketRenderData::Resolved {
-                    strike_price:        bundle.descriptor.strike_price,
+                    strike_price:        bundle.strike_price,
                     final_bitcoin_price: bundle.final_price.unwrap(),
-                    market_id:           bundle.descriptor.ticker.0.clone(),
+                    market_id:           bundle.ticker.0.clone(),
                     delta_history:       &bundle.delta_history
                 }
             }
@@ -255,10 +268,6 @@ async fn main() -> std::io::Result<()>
                 current.apply_event(e);
             }
             Some(e) = previous.communicator.get_receiver().recv() => {
-                if let MarketStreamEvent::Resolved {..} = e
-                {
-                    previous.communicator.set_poll_state(MarketPollState::Resolved);
-                }
 
                 previous.apply_event(e);
             }
