@@ -18,25 +18,25 @@ pub enum MarketRenderData<'a>
 {
     Active
     {
-        strike_price:          Option<f64>,
-        current_bitcoin_price: f64,
-        market_id:             String,
-        time_untill_expiry:    chrono::Duration,
-        orderbook:             Orderbook,
-        delta_history:         &'a DeltaHistory
+        strike_price:               Option<f64>,
+        current_bitcoin_price:      f64,
+        approximated_bitcoin_price: f64,
+        market_id:                  String,
+        time_untill_expiry:         chrono::Duration,
+        orderbook:                  Orderbook,
+        delta_history:              &'a DeltaHistory
     },
     Resolving
     {
-        strike_price:                 Option<f64>,
-        estimate_final_bitcoin_price: f64,
-        market_id:                    String,
-        time_after_expiry:            chrono::Duration,
-        orderbook:                    Orderbook,
-        delta_history:                &'a DeltaHistory
+        strike_price:      Option<f64>,
+        market_id:         String,
+        time_after_expiry: chrono::Duration,
+        orderbook:         Orderbook,
+        delta_history:     &'a DeltaHistory
     },
     Resolved
     {
-        strike_price:        Option<f64>,
+        strike_price:        f64,
         final_bitcoin_price: f64,
         market_id:           String,
         delta_history:       &'a DeltaHistory
@@ -54,10 +54,10 @@ impl<'a> MarketRenderData<'a>
             }
             | MarketRenderData::Resolving {
                 strike_price, ..
-            }
-            | MarketRenderData::Resolved {
+            } => *strike_price,
+            MarketRenderData::Resolved {
                 strike_price, ..
-            } => *strike_price
+            } => Some(*strike_price)
         }
     }
 
@@ -149,16 +149,25 @@ fn render_header(frame: &mut Frame, area: Rect, data: &MarketRenderData)
     {
         MarketRenderData::Active {
             current_bitcoin_price,
+            approximated_bitcoin_price,
             ..
-        } => format!(" Live Bitcoin Price: ${current_bitcoin_price:.2}"),
+        } =>
+        {
+            format!(
+                " Live Bitcoin Price: ${current_bitcoin_price:.2} | Estimate: \
+                 ${approximated_bitcoin_price:.2}"
+            )
+        }
         MarketRenderData::Resolving {
-            estimate_final_bitcoin_price,
             ..
-        } => format!(" Final Bitcoin Estimated Price: ${estimate_final_bitcoin_price}"),
+        } => String::new(),
         MarketRenderData::Resolved {
             final_bitcoin_price,
             ..
-        } => format!(" Final Bitcoin Price: ${final_bitcoin_price}")
+        } =>
+        {
+            format!(" Final Bitcoin Price: ${final_bitcoin_price}")
+        }
     };
 
     let (delta_string, delta_color) = {
@@ -171,39 +180,37 @@ fn render_header(frame: &mut Frame, area: Rect, data: &MarketRenderData)
             } => Some(current_bitcoin_price - strike_price),
             MarketRenderData::Resolving {
                 strike_price: Some(strike_price),
-                estimate_final_bitcoin_price,
                 ..
-            } => Some(estimate_final_bitcoin_price - strike_price),
+            } => None,
             MarketRenderData::Resolved {
-                strike_price: Some(strike_price),
+                strike_price,
                 final_bitcoin_price,
                 ..
             } => Some(final_bitcoin_price - strike_price),
             _ => None
         };
 
-        let delta_string = format!(
-            " Delta: {}",
-            delta.map_or(Cow::Borrowed("---"), |d| Cow::Owned(format!("{:+.2}", d)))
-        );
-
-        let delta_color = if let Some(delta) = delta
+        if let Some(delta) = delta
         {
-            if delta.is_sign_positive()
-            {
-                Color::Green
-            }
-            else
-            {
-                Color::Red
-            }
+            let delta_string = format!(" Delta: {:+.2}", delta);
+
+            let delta_color = {
+                if delta.is_sign_positive()
+                {
+                    Color::Green
+                }
+                else
+                {
+                    Color::Red
+                }
+            };
+
+            (delta_string, delta_color)
         }
         else
         {
-            Color::Gray
-        };
-
-        (delta_string, delta_color)
+            (String::new(), Color::Magenta)
+        }
     };
 
     let (expiry_status_string, expiry_status_color) = match data
@@ -246,8 +253,23 @@ fn render_header(frame: &mut Frame, area: Rect, data: &MarketRenderData)
             )
         }
         MarketRenderData::Resolved {
+            strike_price,
+            final_bitcoin_price,
             ..
-        } => (Cow::Borrowed(" Market Resolved"), delta_color)
+        } =>
+        {
+            (
+                Cow::Borrowed(" Market Resolved"),
+                if (strike_price - final_bitcoin_price) > 0.0
+                {
+                    Color::Red
+                }
+                else
+                {
+                    Color::Green
+                }
+            )
+        }
     };
 
     frame.render_widget(

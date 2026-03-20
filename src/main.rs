@@ -154,29 +154,29 @@ async fn main() -> std::io::Result<()>
             | MarketPollState::FarBeforeActive =>
             {
                 MarketRenderData::Active {
-                    strike_price:          bundle.strike_price,
+                    strike_price: bundle.strike_price,
                     current_bitcoin_price: real_bitcoin_price,
-                    market_id:             bundle.ticker.0.clone(),
-                    time_untill_expiry:    bundle.close_time - now,
-                    orderbook:             bundle.orderbook.clone(),
-                    delta_history:         &bundle.delta_history
+                    market_id: bundle.ticker.0.clone(),
+                    time_untill_expiry: bundle.close_time - now,
+                    orderbook: bundle.orderbook.clone(),
+                    delta_history: &bundle.delta_history,
+                    approximated_bitcoin_price
                 }
             }
             MarketPollState::ActivelyTryingToResolve =>
             {
                 MarketRenderData::Resolving {
-                    strike_price:                 bundle.strike_price,
-                    estimate_final_bitcoin_price: real_bitcoin_price,
-                    market_id:                    bundle.ticker.0.clone(),
-                    time_after_expiry:            now - bundle.close_time,
-                    orderbook:                    bundle.orderbook.clone(),
-                    delta_history:                &bundle.delta_history
+                    strike_price:      bundle.strike_price,
+                    market_id:         bundle.ticker.0.clone(),
+                    time_after_expiry: now - bundle.close_time,
+                    orderbook:         bundle.orderbook.clone(),
+                    delta_history:     &bundle.delta_history
                 }
             }
             MarketPollState::Resolved =>
             {
                 MarketRenderData::Resolved {
-                    strike_price:        bundle.strike_price,
+                    strike_price:        bundle.strike_price.unwrap(),
                     final_bitcoin_price: bundle.final_price.unwrap(),
                     market_id:           bundle.ticker.0.clone(),
                     delta_history:       &bundle.delta_history
