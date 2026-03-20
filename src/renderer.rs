@@ -108,8 +108,8 @@ pub fn render_market(frame: &mut Frame, area: Rect, data: &MarketRenderData)
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(8),
-                    Constraint::Length(22),
+                    Constraint::Length(9),
+                    Constraint::Length(25),
                     Constraint::Fill(1)
                 ])
                 .split(area);
@@ -319,7 +319,6 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
     };
 
     // Asks are derived from No Bids (Negative Shares in our array).
-    // We iterate forward (lowest price first) to find the best asks.
     let mut asks: Vec<(f64, i32)> = orderbook
         .data
         .iter()
@@ -338,11 +337,9 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         .take(8)
         .collect();
 
-    // Reverse so the highest ask price is at the top of the terminal
     asks.reverse();
 
     // Bids are Yes Bids (Positive Shares).
-    // We iterate backwards (highest price first) to find the best bids.
     let bids: Vec<(f64, i32)> = orderbook
         .data
         .iter()
@@ -382,30 +379,30 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         _ => " - ".to_string()
     };
 
+    // 33-character wide table layout
     let empty = || {
         Line::from(Span::styled(
-            "         - │ -                ",
+            "       -       │ -               ",
             Style::default().fg(Color::DarkGray)
         ))
     };
     let separator = Line::from(Span::styled(
-        "───────────┼──────────────────",
+        "───────────────┼─────────────────",
         Style::default().fg(Color::DarkGray)
     ));
 
     let mut lines = vec![
         Line::from(Span::styled(
-            "   ASKS (Sell YES / Buy NO)   ",
-            Style::default().fg(Color::Red)
+            " BUY   / SELL  │                 ",
+            Style::default().fg(Color::DarkGray)
         )),
         Line::from(Span::styled(
-            " Price (¢) │ Size             ",
+            " YES ¢ / NO ¢  │ SIZE            ",
             Style::default().fg(Color::DarkGray)
         )),
         separator.clone(),
     ];
 
-    // Pad asks if there are fewer than 8
     for _ in 0..8usize.saturating_sub(asks.len())
     {
         lines.push(empty());
@@ -414,45 +411,49 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
     // Render Asks
     for (cents, shares) in &asks
     {
+        let no_cents = 100.0 - cents;
         lines.push(Line::from(Span::styled(
-            format!("{:>9.1} │ {:<16}", cents, shares),
+            format!(" {:>5.1} / {:<5.1} │ {:<16}", cents, no_cents, shares),
             Style::default().fg(Color::LightRed)
         )));
     }
 
     // Render Spread
     lines.push(Line::from(Span::styled(
-        format!("── SPREAD: {:<5} ─────────────", spread_s),
+        format!("── SPREAD: {:<5} ────────────────", spread_s),
         Style::default().fg(Color::Yellow)
     )));
 
     // Render Bids
     for (cents, shares) in &bids
     {
+        let no_cents = 100.0 - cents;
         lines.push(Line::from(Span::styled(
-            format!("{:>9.1} │ {:<16}", cents, shares),
+            format!(" {:>5.1} / {:<5.1} │ {:<16}", cents, no_cents, shares),
             Style::default().fg(Color::LightGreen)
         )));
     }
 
-    // Pad bids if there are fewer than 8
     for _ in 0..8usize.saturating_sub(bids.len())
     {
         lines.push(empty());
     }
 
-    lines.push(separator);
+    lines.push(separator.clone());
     lines.push(Line::from(Span::styled(
-        "   BIDS (Buy YES / Sell NO)   ",
-        Style::default().fg(Color::Green)
+        " YES ¢ / NO ¢  │ SIZE            ",
+        Style::default().fg(Color::DarkGray)
+    )));
+    lines.push(Line::from(Span::styled(
+        " SELL  /  BUY  │                 ",
+        Style::default().fg(Color::DarkGray)
     )));
 
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::White)) /* Adjust this to match your
-                                                                  * border variable */
+                .border_style(Style::default().fg(Color::White))
         ),
         area
     );
@@ -497,17 +498,28 @@ fn render_chart(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         })
         .collect::<Vec<_>>();
 
-    let min_delta = min_delta.unwrap_or(0.0);
-    let max_delta = max_delta.unwrap_or(0.0);
+    // Ensure 0.0 is always included in the Y-axis bounds
+    let min_delta = min_delta.unwrap_or(-1.0).min(-1.0);
+    let max_delta = max_delta.unwrap_or(1.0).max(1.0);
 
+    // The actual historical market data
     let dataset = ratatui::widgets::Dataset::default()
         .marker(ratatui::symbols::Marker::Braille)
         .style(Style::default().fg(Color::Cyan))
         .graph_type(ratatui::widgets::GraphType::Line)
         .data(&data_to_render);
 
+    // The static yellow zero-line
+    let zero_line_data = [(0.0, 0.0), (1.0, 0.0)];
+    let zero_dataset = ratatui::widgets::Dataset::default()
+        .marker(ratatui::symbols::Marker::Braille)
+        .style(Style::default().fg(Color::Yellow))
+        .graph_type(ratatui::widgets::GraphType::Line)
+        .data(&zero_line_data);
+
     frame.render_widget(
-        ratatui::widgets::Chart::new(vec![dataset])
+        // Render the zero line first so the blue price line draws over top of it
+        ratatui::widgets::Chart::new(vec![zero_dataset, dataset])
             .block(
                 Block::default()
                     .borders(Borders::ALL)

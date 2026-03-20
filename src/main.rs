@@ -19,6 +19,7 @@ use kalshi::{
     PreviousCurrentAndNextMarkets,
     poll_previous_current_and_next_market
 };
+use meth::Meth;
 use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::prelude::CrosstermBackend;
@@ -36,6 +37,8 @@ mod shared;
 #[tokio::main]
 async fn main() -> std::io::Result<()>
 {
+    let _meth = Meth::new();
+
     dotenvy::dotenv().ok();
 
     let api_key_id = env::var("KALSHI_API_KEY_ID").expect("Missing KALSHI_API_KEY_ID");
