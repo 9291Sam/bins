@@ -92,17 +92,16 @@ pub struct MarketTicker(pub String);
 #[derive(Debug, Clone, Deserialize)]
 pub struct KalshiMarketDescriptor
 {
-    pub ticker:       MarketTicker,
+    pub ticker:                MarketTicker,
     #[serde(rename = "floor_strike")]
-    pub strike_price: Option<f64>,
-    pub close_time:   DateTime<Utc> /* pub status:                KalshiMarketStatus,
-                                     * pub result:
-                                     * Option<KalshiBinaryMarketResult>,
-                                     * #[serde(default, deserialize_with =
-                                     * "deserialize_optional_stringified_float")]
-                                     * pub expiration_value:      Option<f64>,
-                                     * pub price_level_structure: String,
-                                     * pub price_ranges:          Vec<Value> */
+    pub strike_price:          Option<f64>,
+    pub close_time:            DateTime<Utc>,
+    pub status:                KalshiMarketStatus,
+    pub result:                Option<KalshiBinaryMarketResult>,
+    #[serde(default, deserialize_with = "deserialize_optional_stringified_float")]
+    pub expiration_value:      Option<f64>,
+    pub price_level_structure: String,
+    pub price_ranges:          Vec<Value>
 }
 
 impl KalshiMarketDescriptor

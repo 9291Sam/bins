@@ -126,11 +126,11 @@ async fn main() -> std::io::Result<()>
     }
 
     fn create_render_data_from_bundle(
-        bundle: &MarketBundle,
+        bundle: &'_ MarketBundle,
         now: DateTime<Utc>,
         real_bitcoin_price: f64,
         approximated_bitcoin_price: f64
-    ) -> MarketRenderData
+    ) -> MarketRenderData<'_>
     {
         let state = bundle.communicator.get_poll_state();
 
@@ -146,7 +146,7 @@ async fn main() -> std::io::Result<()>
                     market_id:             bundle.descriptor.ticker.0.clone(),
                     time_untill_expiry:    bundle.descriptor.close_time - now,
                     orderbook:             bundle.orderbook.clone(),
-                    delta_history:         bundle.delta_history
+                    delta_history:         &bundle.delta_history
                 }
             }
             MarketPollState::ActivelyTryingToResolve =>
@@ -157,7 +157,7 @@ async fn main() -> std::io::Result<()>
                     market_id:                    bundle.descriptor.ticker.0.clone(),
                     time_after_expiry:            now - bundle.descriptor.close_time,
                     orderbook:                    bundle.orderbook.clone(),
-                    delta_history:                bundle.delta_history
+                    delta_history:                &bundle.delta_history
                 }
             }
             MarketPollState::Resolved =>
@@ -166,7 +166,7 @@ async fn main() -> std::io::Result<()>
                     strike_price:        bundle.descriptor.strike_price,
                     final_bitcoin_price: bundle.final_price.unwrap(),
                     market_id:           bundle.descriptor.ticker.0.clone(),
-                    delta_history:       bundle.delta_history
+                    delta_history:       &bundle.delta_history
                 }
             }
         }

@@ -14,7 +14,7 @@ use crate::shared::{
     index_to_dollars
 };
 
-pub enum MarketRenderData
+pub enum MarketRenderData<'a>
 {
     Active
     {
@@ -23,7 +23,7 @@ pub enum MarketRenderData
         market_id:             String,
         time_untill_expiry:    chrono::Duration,
         orderbook:             Orderbook,
-        delta_history:         DeltaHistory
+        delta_history:         &'a DeltaHistory
     },
     Resolving
     {
@@ -32,18 +32,18 @@ pub enum MarketRenderData
         market_id:                    String,
         time_after_expiry:            chrono::Duration,
         orderbook:                    Orderbook,
-        delta_history:                DeltaHistory
+        delta_history:                &'a DeltaHistory
     },
     Resolved
     {
         strike_price:        Option<f64>,
         final_bitcoin_price: f64,
         market_id:           String,
-        delta_history:       DeltaHistory
+        delta_history:       &'a DeltaHistory
     }
 }
 
-impl MarketRenderData
+impl<'a> MarketRenderData<'a>
 {
     pub fn get_strike_price(&self) -> Option<f64>
     {
@@ -77,7 +77,7 @@ impl MarketRenderData
         }
     }
 
-    pub fn get_delta_history(&self) -> &DeltaHistory
+    pub fn get_delta_history(&'a self) -> &'a DeltaHistory
     {
         match self
         {
@@ -441,8 +441,9 @@ fn render_chart(frame: &mut Frame, area: Rect, data: &MarketRenderData)
     let mut min_delta: Option<f64> = None;
     let mut max_delta: Option<f64> = None;
 
-    let data_to_render: [(f64, f64); DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE] =
-        std::array::from_fn(|idx| {
+    let data_to_render: Box<[(f64, f64); DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]> = (0
+        ..DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE)
+        .map(|idx| {
             let delta = data.get_delta_history()[idx];
 
             if let Some(v) = &mut min_delta
@@ -467,7 +468,10 @@ fn render_chart(frame: &mut Frame, area: Rect, data: &MarketRenderData)
                 idx as f64 / DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE as f64,
                 delta
             )
-        });
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
 
     let min_delta = min_delta.unwrap();
     let max_delta = max_delta.unwrap();
@@ -476,7 +480,7 @@ fn render_chart(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         .marker(ratatui::symbols::Marker::Braille)
         .style(Style::default().fg(Color::Cyan))
         .graph_type(ratatui::widgets::GraphType::Line)
-        .data(&data_to_render);
+        .data(&*data_to_render);
 
     frame.render_widget(
         ratatui::widgets::Chart::new(vec![dataset])

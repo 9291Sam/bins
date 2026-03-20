@@ -16,9 +16,9 @@ pub const SAVING_INTERVAL_HZ: usize = 4;
 pub const DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE: usize =
     SAVING_INTERVAL_HZ * MARKET_INTERVAL_SECONDS;
 
-pub type CompleteOrderBookRecord = [Orderbook; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE];
+pub type CompleteOrderBookRecord = Box<[Orderbook; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]>;
 
-pub type DeltaHistory = [f64; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE];
+pub type DeltaHistory = Box<[f64; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]>;
 
 /// Tapered-deci-cent#
 #[derive(Clone)]
@@ -135,7 +135,10 @@ impl MarketBundle
             ),
             descriptor,
             orderbook: Orderbook::new(),
-            delta_history: [0.0; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE], // TODO: make nan
+            delta_history: vec![0.0; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
             final_price: None
         }
     }
