@@ -143,46 +143,58 @@ impl KalshiMarketReader
                     },
                     _ = interval.tick() => {
 
-                        match state {
-                            MarketPollState::FarBeforeActive => {},
-                            MarketPollState::RightBeforeActive | MarketPollState::Active => {
-                                if web_socket.is_none()
-                                {
-                                    web_socket = Some(
-                                        connect_ws(
-                                            std::slice::from_ref(&ticker.0),
-                                            &api_key_id,
-                                            &priv_key_path
-                                        ).await.unwrap()
-                                    );
+                        let mut connect_to_websocket = async || {
+                            if web_socket.is_none()
+                            {
+                                web_socket = Some(
+                                    connect_ws(
+                                        std::slice::from_ref(&ticker.0),
+                                        &api_key_id,
+                                        &priv_key_path
+                                    ).await.unwrap()
+                                );
 
-                                }
-                            },
-                            MarketPollState::ActivelyTryingToResolve => {
-                                ticks_since_last_resolve_poll += 1;
+                            }
+                        };
+
+                        let mut poll_if_not_recent = async ||  {
+                            ticks_since_last_resolve_poll += 1;
 
                                 if ticks_since_last_resolve_poll > TICKS_BETWEEN_RESOLVE_POLLS
                                 {
-                                    ticks_since_last_resolve_poll = 0;
 
+                                    ticks_since_last_resolve_poll = 0;
                                     let now = Utc::now();
 
                                     let nearby_markets = super::poll_nearby_markets(
                                         &rest_client, now
                                     ).await;
 
-                                    let this_market_current_data = nearby_markets
-                                        .iter()
-                                        .find(|m| m.ticker == ticker)
-                                        .unwrap();
-
-
-                                        output_tx.send(
-                                            MarketStreamEvent::NewDescriptors(nearby_markets)
-                                        ).unwrap();
-
-
+                                    output_tx.send(
+                                        MarketStreamEvent::NewDescriptors(nearby_markets)
+                                    ).unwrap();
                                 }
+                        };
+
+                        match state {
+                            MarketPollState::FarBeforeActive => {},
+                            MarketPollState::RightBeforeActive |
+                            MarketPollState::ActiveLookingForStrike |
+                            MarketPollState::ActiveKnownStrike => {
+                                connect_to_websocket().await;
+
+                                if state == MarketPollState::ActiveLookingForStrike
+                                {
+                                    poll_if_not_recent().await;
+                                }
+
+                            },
+                             |
+                            MarketPollState::ActivelyTryingToResolve => {
+
+                                    poll_if_not_recent().await;
+
+
                             },
                             MarketPollState::Resolved => {},
                         }
@@ -300,11 +312,11 @@ struct DeltaMsg
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MarketPollState
 {
-    FarBeforeActive,   // in the 30 minutes before a market becomes active,
-    RightBeforeActive, // in the 30 seconds before a market becomes active,
-    Active,            // The market is active,
-    ActivelyTryingToResolve, /* the market has finished and so has trading, we are trying to
-                        * figure out what the final strike price is */
+    FarBeforeActive,
+    RightBeforeActive,
+    ActiveLookingForStrike,
+    ActiveKnownStrike,
+    ActivelyTryingToResolve,
     Resolved
 }
 

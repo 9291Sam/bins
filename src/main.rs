@@ -27,7 +27,7 @@ use tokio::time::interval;
 
 use crate::kalshi::KalshiMarketStatus;
 use crate::renderer::{MarketRenderData, render_market};
-use crate::shared::MarketBundle;
+use crate::shared::{MarketBundle, SAVING_INTERVAL_SECONDS};
 
 mod kalshi;
 mod renderer;
@@ -63,7 +63,7 @@ async fn main() -> std::io::Result<()>
         );
         let current = MarketBundle::new(
             current_market,
-            MarketPollState::Active,
+            MarketPollState::ActiveLookingForStrike,
             api_key_id.clone(),
             priv_key_path.clone()
         );
@@ -87,7 +87,8 @@ async fn main() -> std::io::Result<()>
         previous: &mut MarketBundle,
         api_key_id: &str,
         priv_key_path: &str,
-        now: DateTime<Utc>
+        now: DateTime<Utc>,
+        real_bitcoin_price: f64
     )
     {
         if next.communicator.get_poll_state() == MarketPollState::FarBeforeActive
@@ -119,22 +120,39 @@ async fn main() -> std::io::Result<()>
             // new_next -> next && drop old previous
             std::mem::drop(std::mem::replace(next, new_next));
 
-            current.communicator.set_poll_state(MarketPollState::Active);
+            current
+                .communicator
+                .set_poll_state(MarketPollState::ActiveLookingForStrike);
             previous
                 .communicator
                 .set_poll_state(MarketPollState::ActivelyTryingToResolve);
         }
 
         if previous.communicator.get_poll_state() == MarketPollState::ActivelyTryingToResolve
+            && (previous.status == KalshiMarketStatus::Determined
+                || previous.status == KalshiMarketStatus::Finalized)
         {
-            if previous.status == KalshiMarketStatus::Determined
-                || previous.status == KalshiMarketStatus::Finalized
-            {
-                // TODO: make these statuses more fine grained
-                previous
-                    .communicator
-                    .set_poll_state(MarketPollState::Resolved);
-            }
+            // TODO: make these statuses more fine grained
+            previous
+                .communicator
+                .set_poll_state(MarketPollState::Resolved);
+        }
+
+        if current.communicator.get_poll_state() == MarketPollState::ActiveLookingForStrike
+            && current.strike_price.is_some()
+        {
+            current
+                .communicator
+                .set_poll_state(MarketPollState::ActiveKnownStrike);
+        }
+
+        let time_along_current_seconds = (now - current.get_start_time()).as_seconds_f64();
+        let delta_ticks_along_current =
+            (time_along_current_seconds / SAVING_INTERVAL_SECONDS) as usize;
+        if let Some(s) = current.strike_price
+            && real_bitcoin_price != 0.0
+        {
+            current.delta_history[delta_ticks_along_current] = real_bitcoin_price - s;
         }
     }
 
@@ -149,7 +167,8 @@ async fn main() -> std::io::Result<()>
 
         match state
         {
-            MarketPollState::Active
+            MarketPollState::ActiveLookingForStrike
+            | MarketPollState::ActiveKnownStrike
             | MarketPollState::RightBeforeActive
             | MarketPollState::FarBeforeActive =>
             {
@@ -244,6 +263,7 @@ async fn main() -> std::io::Result<()>
                     &api_key_id,
                     &priv_key_path,
                     now,
+                    real_bitcoin_price
                 ).await;
 
                 tick_render_function(

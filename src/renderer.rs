@@ -463,10 +463,14 @@ fn render_chart(frame: &mut Frame, area: Rect, data: &MarketRenderData)
     let mut min_delta: Option<f64> = None;
     let mut max_delta: Option<f64> = None;
 
-    let data_to_render: Box<[(f64, f64); DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]> = (0
-        ..DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE)
-        .map(|idx| {
+    let data_to_render: Vec<(f64, f64)> = (0..DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE)
+        .filter_map(|idx| {
             let delta = data.get_delta_history()[idx];
+
+            if delta == 0.0
+            {
+                return None;
+            }
 
             if let Some(v) = &mut min_delta
             {
@@ -486,23 +490,21 @@ fn render_chart(frame: &mut Frame, area: Rect, data: &MarketRenderData)
                 max_delta = Some(delta);
             }
 
-            (
+            Some((
                 idx as f64 / DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE as f64,
                 delta
-            )
+            ))
         })
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
+        .collect::<Vec<_>>();
 
-    let min_delta = min_delta.unwrap();
-    let max_delta = max_delta.unwrap();
+    let min_delta = min_delta.unwrap_or(0.0);
+    let max_delta = max_delta.unwrap_or(0.0);
 
     let dataset = ratatui::widgets::Dataset::default()
         .marker(ratatui::symbols::Marker::Braille)
         .style(Style::default().fg(Color::Cyan))
         .graph_type(ratatui::widgets::GraphType::Line)
-        .data(&*data_to_render);
+        .data(&data_to_render);
 
     frame.render_widget(
         ratatui::widgets::Chart::new(vec![dataset])
