@@ -9,6 +9,9 @@ base64 = "0.22.1"
 chrono = { version = "0.4.44", features = ["serde"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 dotenvy = "0.15.0"
+eframe = "0.33.3"
+egui = "0.33.3"
+egui_plot = "0.34.1"
 futures-util = "0.3.32"
 meth = "0.1.0"
 ratatui = "0.30.0"

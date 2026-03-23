@@ -15,7 +15,6 @@ use crate::kalshi::{
 pub const MARKET_INTERVAL_MINUTES: usize = 15;
 pub const MARKET_INTERVAL_SECONDS: usize = MARKET_INTERVAL_MINUTES * 60;
 
-pub const SCREEN_UPDATES_HZ: usize = 60;
 pub const SAVING_INTERVAL_HZ: usize = 4;
 pub const SAVING_INTERVAL_SECONDS: f64 = 1.0 / (SAVING_INTERVAL_HZ as f64);
 
@@ -45,12 +44,12 @@ impl Orderbook
         }
     }
 
-    pub fn get_shares(&self, dollars: f64) -> i32
-    {
-        self.data[get_index_of_dollars(dollars)
-            .with_context(|| format!("Tried to get index of ${dollars}"))
-            .unwrap()]
-    }
+    // pub fn get_shares(&self, dollars: f64) -> i32
+    // {
+    //     self.data[get_index_of_dollars(dollars)
+    //         .with_context(|| format!("Tried to get index of ${dollars}"))
+    //         .unwrap()]
+    // }
 
     pub fn set_shares(&mut self, dollars: f64, shares: i32)
     {

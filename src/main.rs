@@ -1,30 +1,17 @@
 use std::env;
-use std::io::Stdout;
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use crossterm::event::{Event, EventStream, KeyCode};
-use crossterm::terminal::{
-    EnterAlternateScreen,
-    LeaveAlternateScreen,
-    disable_raw_mode,
-    enable_raw_mode
-};
-use futures_util::StreamExt;
+use eframe::egui;
 use kalshi::{
     BitcoinPriceGrabber,
     BitcoinPriceUpdate,
     MarketPollState,
-    MarketStreamEvent,
     PreviousCurrentAndNextMarkets,
     poll_previous_current_and_next_market
 };
 use meth::Meth;
-use ratatui::Terminal;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::prelude::CrosstermBackend;
 use reqwest::Client;
-use tokio::time::interval;
 
 use crate::kalshi::KalshiMarketStatus;
 use crate::renderer::{MarketRenderData, render_market};
@@ -34,8 +21,232 @@ mod kalshi;
 mod renderer;
 mod shared;
 
-#[tokio::main]
-async fn main() -> std::io::Result<()>
+struct KalshiApp
+{
+    rt:                         tokio::runtime::Runtime,
+    next:                       MarketBundle,
+    current:                    MarketBundle,
+    previous:                   MarketBundle,
+    bitcoin_price_grabber:      BitcoinPriceGrabber,
+    real_bitcoin_price:         f64,
+    approximated_bitcoin_price: f64,
+    api_key_id:                 String,
+    priv_key_path:              String,
+
+    // Tracks ongoing async network requests so we don't spam the API while waiting
+    market_fetch_rx: Option<tokio::sync::oneshot::Receiver<PreviousCurrentAndNextMarkets>>
+}
+
+fn create_render_data_from_bundle<'a>(
+    bundle: &'a MarketBundle,
+    now: DateTime<Utc>,
+    real_bitcoin_price: f64,
+    approximated_bitcoin_price: f64
+) -> MarketRenderData<'a>
+{
+    let state = bundle.communicator.get_poll_state();
+
+    match state
+    {
+        MarketPollState::ActiveLookingForStrike
+        | MarketPollState::ActiveKnownStrike
+        | MarketPollState::RightBeforeActive
+        | MarketPollState::FarBeforeActive =>
+        {
+            MarketRenderData::Active {
+                strike_price: bundle.strike_price,
+                current_bitcoin_price: real_bitcoin_price,
+                market_id: bundle.ticker.0.clone(),
+                time_untill_expiry: bundle.close_time - now,
+                orderbook: bundle.orderbook.clone(),
+                delta_history: &bundle.delta_history,
+                approximated_bitcoin_price
+            }
+        }
+        MarketPollState::ActivelyTryingToResolve =>
+        {
+            MarketRenderData::Resolving {
+                strike_price:      bundle.strike_price,
+                market_id:         bundle.ticker.0.clone(),
+                time_after_expiry: now - bundle.close_time,
+                orderbook:         bundle.orderbook.clone(),
+                delta_history:     &bundle.delta_history
+            }
+        }
+        MarketPollState::Resolved =>
+        {
+            MarketRenderData::Resolved {
+                strike_price:        bundle.strike_price.unwrap(),
+                final_bitcoin_price: bundle.final_price.unwrap(),
+                market_id:           bundle.ticker.0.clone(),
+                delta_history:       &bundle.delta_history
+            }
+        }
+    }
+}
+
+impl eframe::App for KalshiApp
+{
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame)
+    {
+        let now = Utc::now();
+
+        // 1. Resolve pending async market fetches
+        let mut fetch_ready = false;
+        let mut new_markets = None;
+        if let Some(rx) = &mut self.market_fetch_rx
+        {
+            match rx.try_recv()
+            {
+                Ok(markets) =>
+                {
+                    fetch_ready = true;
+                    new_markets = Some(markets);
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) =>
+                {
+                    fetch_ready = true; // The task dropped/failed, clear the lock
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) =>
+                {} // Still fetching
+            }
+        }
+
+        if fetch_ready
+        {
+            self.market_fetch_rx = None;
+            if let Some(markets) = new_markets
+            {
+                let new_next = MarketBundle::new(
+                    markets.next_market,
+                    MarketPollState::FarBeforeActive,
+                    self.api_key_id.clone(),
+                    self.priv_key_path.clone()
+                );
+
+                std::mem::swap(&mut self.previous, &mut self.current);
+                std::mem::swap(&mut self.next, &mut self.current);
+                self.next = new_next;
+
+                self.current
+                    .communicator
+                    .set_poll_state(MarketPollState::ActiveLookingForStrike);
+                self.previous
+                    .communicator
+                    .set_poll_state(MarketPollState::ActivelyTryingToResolve);
+            }
+        }
+
+        // 2. Poll all non-blocking channels
+        while let Ok(e) = self.next.communicator.get_receiver().try_recv()
+        {
+            self.next.apply_event(e);
+        }
+        while let Ok(e) = self.current.communicator.get_receiver().try_recv()
+        {
+            self.current.apply_event(e);
+        }
+        while let Ok(e) = self.previous.communicator.get_receiver().try_recv()
+        {
+            self.previous.apply_event(e);
+        }
+        while let Ok(u) = self.bitcoin_price_grabber.get_receiver().try_recv()
+        {
+            match u
+            {
+                BitcoinPriceUpdate::Official(o) => self.real_bitcoin_price = o,
+                BitcoinPriceUpdate::Approximated(a) => self.approximated_bitcoin_price = a
+            }
+        }
+
+        // 3. Tick state updates
+        if self.next.communicator.get_poll_state() == MarketPollState::FarBeforeActive
+            && now - self.next.get_start_time() < TimeDelta::seconds(30)
+        {
+            self.next
+                .communicator
+                .set_poll_state(MarketPollState::RightBeforeActive);
+        }
+
+        // If current is closed AND we aren't already fetching the next cycle, spawn the
+        // fetch task
+        if (now - self.current.close_time) > TimeDelta::zero() && self.market_fetch_rx.is_none()
+        {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.rt.spawn(async move {
+                let res = poll_previous_current_and_next_market(&Client::new(), now).await;
+                let _ = tx.send(res);
+            });
+            self.market_fetch_rx = Some(rx);
+        }
+
+        if self.previous.communicator.get_poll_state() == MarketPollState::ActivelyTryingToResolve
+            && (self.previous.status == KalshiMarketStatus::Determined
+                || self.previous.status == KalshiMarketStatus::Finalized)
+        {
+            self.previous
+                .communicator
+                .set_poll_state(MarketPollState::Resolved);
+        }
+
+        if self.current.communicator.get_poll_state() == MarketPollState::ActiveLookingForStrike
+            && self.current.strike_price.is_some()
+        {
+            self.current
+                .communicator
+                .set_poll_state(MarketPollState::ActiveKnownStrike);
+        }
+
+        let time_along_current_seconds = (now - self.current.get_start_time()).as_seconds_f64();
+        let delta_ticks_along_current =
+            (time_along_current_seconds / SAVING_INTERVAL_SECONDS) as usize;
+
+        if let Some(s) = self.current.strike_price
+        {
+            if self.real_bitcoin_price != 0.0
+            {
+                // Bounds check added to ensure the immediate-mode GUI thread never panics on a
+                // misaligned tick
+                if delta_ticks_along_current < self.current.delta_history.len()
+                {
+                    self.current.delta_history[delta_ticks_along_current] =
+                        self.real_bitcoin_price - s;
+                }
+            }
+        }
+
+        // 4. Render UI
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.columns(2, |columns| {
+                render_market(
+                    &mut columns[0],
+                    &create_render_data_from_bundle(
+                        &self.current,
+                        now,
+                        self.real_bitcoin_price,
+                        self.approximated_bitcoin_price
+                    )
+                );
+                render_market(
+                    &mut columns[1],
+                    &create_render_data_from_bundle(
+                        &self.previous,
+                        now,
+                        self.real_bitcoin_price,
+                        self.approximated_bitcoin_price
+                    )
+                );
+            });
+        });
+
+        // 5. Force the loop to continue (equates to the `TIME_BETWEEN_UPDATE_TICKS_MS`
+        //    timer)
+        ctx.request_repaint_after(Duration::from_millis(25));
+    }
+}
+
+// Notice main is no longer #[tokio::main]
+fn main() -> eframe::Result<()>
 {
     let _meth = Meth::new();
 
@@ -45,13 +256,18 @@ async fn main() -> std::io::Result<()>
     let priv_key_path =
         env::var("KALSHI_PRIVATE_KEY_PATH").expect("Missing KALSHI_PRIVATE_KEY_PATH");
 
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
-    let mut terminal: Terminal<CrosstermBackend<Stdout>> =
-        ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
+    // Manually create the multi-threaded tokio runtime
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to construct tokio runtime");
 
-    let (mut next, mut current, mut previous) = {
+    // Enter the runtime context. This ensures that any `tokio::spawn` calls
+    // inside `MarketBundle::new` or `BitcoinPriceGrabber::new` function correctly.
+    let _guard = rt.enter();
+
+    // Blocking initialization
+    let (next, current, previous) = rt.block_on(async {
         let PreviousCurrentAndNextMarkets {
             next_market,
             current_market,
@@ -78,236 +294,31 @@ async fn main() -> std::io::Result<()>
         );
 
         (next, current, previous)
+    });
+
+    let bitcoin_price_grabber = BitcoinPriceGrabber::new();
+
+    let app = KalshiApp {
+        rt, // Pass ownership of the runtime into the app so it stays alive
+        next,
+        current,
+        previous,
+        bitcoin_price_grabber,
+        real_bitcoin_price: 0.0,
+        approximated_bitcoin_price: 0.0,
+        api_key_id,
+        priv_key_path,
+        market_fetch_rx: None
     };
 
-    const TIME_BETWEEN_UPDATE_TICKS_MS: u64 = 25;
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]),
+        ..Default::default()
+    };
 
-    let mut interval = interval(Duration::from_millis(TIME_BETWEEN_UPDATE_TICKS_MS));
-
-    async fn tick_update_function(
-        next: &mut MarketBundle,
-        current: &mut MarketBundle,
-        previous: &mut MarketBundle,
-        api_key_id: &str,
-        priv_key_path: &str,
-        now: DateTime<Utc>,
-        real_bitcoin_price: f64
+    eframe::run_native(
+        "Kalshi Terminal",
+        options,
+        Box::new(|_cc| Ok(Box::new(app)))
     )
-    {
-        if next.communicator.get_poll_state() == MarketPollState::FarBeforeActive
-            && now - next.get_start_time() < TimeDelta::seconds(30)
-        {
-            next.communicator
-                .set_poll_state(MarketPollState::RightBeforeActive);
-        }
-
-        if (now - current.close_time) > TimeDelta::zero()
-        {
-            let new_next_descriptor = poll_previous_current_and_next_market(&Client::new(), now)
-                .await
-                .next_market;
-
-            let new_next = MarketBundle::new(
-                new_next_descriptor,
-                MarketPollState::FarBeforeActive,
-                api_key_id.to_owned(),
-                priv_key_path.to_owned()
-            );
-
-            // current -> previous
-            std::mem::swap(previous, current);
-
-            // next -> current
-            std::mem::swap(next, current);
-
-            // new_next -> next && drop old previous
-            std::mem::drop(std::mem::replace(next, new_next));
-
-            current
-                .communicator
-                .set_poll_state(MarketPollState::ActiveLookingForStrike);
-            previous
-                .communicator
-                .set_poll_state(MarketPollState::ActivelyTryingToResolve);
-        }
-
-        if previous.communicator.get_poll_state() == MarketPollState::ActivelyTryingToResolve
-            && (previous.status == KalshiMarketStatus::Determined
-                || previous.status == KalshiMarketStatus::Finalized)
-        {
-            // TODO: make these statuses more fine grained
-            previous
-                .communicator
-                .set_poll_state(MarketPollState::Resolved);
-        }
-
-        if current.communicator.get_poll_state() == MarketPollState::ActiveLookingForStrike
-            && current.strike_price.is_some()
-        {
-            current
-                .communicator
-                .set_poll_state(MarketPollState::ActiveKnownStrike);
-        }
-
-        let time_along_current_seconds = (now - current.get_start_time()).as_seconds_f64();
-        let delta_ticks_along_current =
-            (time_along_current_seconds / SAVING_INTERVAL_SECONDS) as usize;
-        if let Some(s) = current.strike_price
-            && real_bitcoin_price != 0.0
-        {
-            current.delta_history[delta_ticks_along_current] = real_bitcoin_price - s;
-        }
-    }
-
-    fn create_render_data_from_bundle(
-        bundle: &'_ MarketBundle,
-        now: DateTime<Utc>,
-        real_bitcoin_price: f64,
-        approximated_bitcoin_price: f64
-    ) -> MarketRenderData<'_>
-    {
-        let state = bundle.communicator.get_poll_state();
-
-        match state
-        {
-            MarketPollState::ActiveLookingForStrike
-            | MarketPollState::ActiveKnownStrike
-            | MarketPollState::RightBeforeActive
-            | MarketPollState::FarBeforeActive =>
-            {
-                MarketRenderData::Active {
-                    strike_price: bundle.strike_price,
-                    current_bitcoin_price: real_bitcoin_price,
-                    market_id: bundle.ticker.0.clone(),
-                    time_untill_expiry: bundle.close_time - now,
-                    orderbook: bundle.orderbook.clone(),
-                    delta_history: &bundle.delta_history,
-                    approximated_bitcoin_price
-                }
-            }
-            MarketPollState::ActivelyTryingToResolve =>
-            {
-                MarketRenderData::Resolving {
-                    strike_price:      bundle.strike_price,
-                    market_id:         bundle.ticker.0.clone(),
-                    time_after_expiry: now - bundle.close_time,
-                    orderbook:         bundle.orderbook.clone(),
-                    delta_history:     &bundle.delta_history
-                }
-            }
-            MarketPollState::Resolved =>
-            {
-                MarketRenderData::Resolved {
-                    strike_price:        bundle.strike_price.unwrap(),
-                    final_bitcoin_price: bundle.final_price.unwrap(),
-                    market_id:           bundle.ticker.0.clone(),
-                    delta_history:       &bundle.delta_history
-                }
-            }
-        }
-    }
-
-    async fn tick_render_function(
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-        current: &mut MarketBundle,
-        previous: &mut MarketBundle,
-        now: DateTime<Utc>,
-        real_bitcoin_price: f64,
-        approximated_bitcoin_price: f64
-    )
-    {
-        terminal
-            .draw(|frame| {
-                let columns = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Fill(1), Constraint::Fill(1)])
-                    .split(frame.area());
-
-                render_market(
-                    frame,
-                    columns[0],
-                    &create_render_data_from_bundle(
-                        current,
-                        now,
-                        real_bitcoin_price,
-                        approximated_bitcoin_price
-                    )
-                );
-                render_market(
-                    frame,
-                    columns[1],
-                    &create_render_data_from_bundle(
-                        previous,
-                        now,
-                        real_bitcoin_price,
-                        approximated_bitcoin_price
-                    )
-                );
-            })
-            .unwrap();
-    }
-
-    let mut crossterm_events = EventStream::new();
-    let mut real_bitcoin_price: f64 = 0.0;
-    let mut approximated_bitcoin_price: f64 = 0.0;
-
-    let mut bitcoin_price_grabber = BitcoinPriceGrabber::new();
-
-    loop
-    {
-        tokio::select! {
-            _ = interval.tick() => {
-                let now = Utc::now();
-
-                tick_update_function(
-                    &mut next,
-                    &mut current,
-                    &mut previous,
-                    &api_key_id,
-                    &priv_key_path,
-                    now,
-                    real_bitcoin_price
-                ).await;
-
-                tick_render_function(
-                    &mut terminal,
-                    &mut current,
-                    &mut previous,
-                    now,
-                    real_bitcoin_price,
-                    approximated_bitcoin_price
-                ).await;
-
-            },
-            Some(Ok(Event::Key(key))) = crossterm_events.next() => {
-                if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
-                    break;
-                }
-            },
-            Some(e) = next.communicator.get_receiver().recv() => {
-                next.apply_event(e);
-            }
-            Some(e) = current.communicator.get_receiver().recv() => {
-                current.apply_event(e);
-            }
-            Some(e) = previous.communicator.get_receiver().recv() => {
-
-                previous.apply_event(e);
-            }
-            Some(u) = bitcoin_price_grabber.get_receiver().recv() => {
-                match u
-                {
-                    BitcoinPriceUpdate::Official(o) => real_bitcoin_price = o,
-                    BitcoinPriceUpdate::Approximated(a) => approximated_bitcoin_price = a,
-                }
-            }
-
-        }
-    }
-
-    disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    Ok(())
 }

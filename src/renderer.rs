@@ -1,10 +1,7 @@
 use std::borrow::Cow;
 
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use egui::{Color32, Grid, RichText, Ui, WidgetText};
+use egui_plot::{HLine, Line, Plot, PlotPoints, VLine};
 
 use crate::shared::{
     DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE,
@@ -94,7 +91,7 @@ impl<'a> MarketRenderData<'a>
     }
 }
 
-pub fn render_market(frame: &mut Frame, area: Rect, data: &MarketRenderData)
+pub fn render_market(ui: &mut Ui, data: &MarketRenderData)
 {
     match data
     {
@@ -105,205 +102,181 @@ pub fn render_market(frame: &mut Frame, area: Rect, data: &MarketRenderData)
             ..
         } =>
         {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(9),
-                    Constraint::Length(25),
-                    Constraint::Fill(1)
-                ])
-                .split(area);
-
-            render_header(frame, rows[0], data);
-
-            render_orderbook(frame, rows[1], data);
-
-            render_chart(frame, rows[2], data);
+            ui.vertical(|ui| {
+                render_header(ui, data);
+                ui.add_space(8.0);
+                render_orderbook(ui, data);
+                ui.add_space(8.0);
+                render_chart(ui, data);
+            });
         }
         MarketRenderData::Resolved {
             ..
         } =>
         {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(8), Constraint::Fill(1)])
-                .split(area);
-
-            render_header(frame, rows[0], data);
-
-            render_chart(frame, rows[1], data);
+            ui.vertical(|ui| {
+                render_header(ui, data);
+                ui.add_space(8.0);
+                render_chart(ui, data);
+            });
         }
     }
 }
 
-fn render_header(frame: &mut Frame, area: Rect, data: &MarketRenderData)
+fn render_header(ui: &mut Ui, data: &MarketRenderData)
 {
-    let strike_price_string = format!(
-        " Strike: {}",
-        data.get_strike_price()
-            .map(|p| Cow::Owned(p.to_string()))
-            .unwrap_or(Cow::Borrowed("---"))
-    );
+    ui.group(|ui| {
+        ui.set_width(ui.available_width());
 
-    let bitcoin_price_string = match data
-    {
-        MarketRenderData::Active {
-            current_bitcoin_price,
-            approximated_bitcoin_price,
-            ..
-        } =>
-        {
-            format!(
-                " Live Bitcoin Price: ${current_bitcoin_price:.2} | Estimate: \
-                 ${approximated_bitcoin_price:.2}"
-            )
-        }
-        MarketRenderData::Resolving {
-            ..
-        } => String::new(),
-        MarketRenderData::Resolved {
-            final_bitcoin_price,
-            ..
-        } =>
-        {
-            format!(" Final Bitcoin Price: ${final_bitcoin_price}")
-        }
-    };
+        // Terminal Title
+        ui.label(
+            RichText::new(format!(
+                "Kalshi {} minute terminal | {}",
+                MARKET_INTERVAL_MINUTES,
+                data.get_market_id()
+            ))
+            .color(Color32::from_rgb(255, 0, 255)) // Magenta
+            .strong()
+        );
 
-    let (delta_string, delta_color) = {
-        let delta: Option<f64> = match data
+        ui.add_space(4.0);
+
+        // Prices & Delta
+        ui.horizontal(|ui| {
+            let strike_price_string = format!(
+                "Strike: {}",
+                data.get_strike_price()
+                    .map(|p| Cow::Owned(p.to_string()))
+                    .unwrap_or(Cow::Borrowed("---"))
+            );
+            ui.label(RichText::new(strike_price_string).color(Color32::LIGHT_BLUE));
+
+            match data
+            {
+                MarketRenderData::Active {
+                    current_bitcoin_price,
+                    approximated_bitcoin_price,
+                    ..
+                } =>
+                {
+                    ui.label(
+                        RichText::new(format!(
+                            "| Live Bitcoin Price: ${current_bitcoin_price:.2} | Estimate: \
+                             ${approximated_bitcoin_price:.2}"
+                        ))
+                        .color(Color32::YELLOW)
+                    );
+                }
+                MarketRenderData::Resolved {
+                    final_bitcoin_price,
+                    ..
+                } =>
+                {
+                    ui.label(
+                        RichText::new(format!("| Final Bitcoin Price: ${final_bitcoin_price}"))
+                            .color(Color32::YELLOW)
+                    );
+                }
+                _ =>
+                {}
+            }
+
+            // Delta Calculation
+            let delta: Option<f64> = match data
+            {
+                MarketRenderData::Active {
+                    strike_price: Some(strike_price),
+                    current_bitcoin_price,
+                    ..
+                } => Some(current_bitcoin_price - strike_price),
+                MarketRenderData::Resolved {
+                    strike_price,
+                    final_bitcoin_price,
+                    ..
+                } => Some(final_bitcoin_price - strike_price),
+                _ => None
+            };
+
+            if let Some(delta) = delta
+            {
+                let color = if delta.is_sign_positive()
+                {
+                    Color32::GREEN
+                }
+                else
+                {
+                    Color32::RED
+                };
+                ui.label(RichText::new(format!("| Delta: {:+.2}", delta)).color(color));
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // Expiry Status
+        match data
         {
             MarketRenderData::Active {
-                strike_price: Some(strike_price),
-                current_bitcoin_price,
-                ..
-            } => Some(current_bitcoin_price - strike_price),
+                time_untill_expiry, ..
+            } =>
+            {
+                let secs = time_untill_expiry.as_seconds_f64();
+                let color = if secs > 300.0
+                {
+                    Color32::WHITE
+                }
+                else if secs > 60.0
+                {
+                    Color32::YELLOW
+                }
+                else
+                {
+                    Color32::RED
+                };
+
+                ui.label(
+                    RichText::new(format!(
+                        "Market Expiring in {}.{}s",
+                        time_untill_expiry.num_seconds(),
+                        time_untill_expiry.num_milliseconds() % 1000
+                    ))
+                    .color(color)
+                );
+            }
             MarketRenderData::Resolving {
-                strike_price: Some(strike_price),
-                ..
-            } => None,
+                time_after_expiry, ..
+            } =>
+            {
+                ui.label(
+                    RichText::new(format!(
+                        "Market Resolving {}.{}s elapsed",
+                        time_after_expiry.num_seconds(),
+                        time_after_expiry.num_milliseconds() % 1000
+                    ))
+                    .color(Color32::WHITE)
+                );
+            }
             MarketRenderData::Resolved {
                 strike_price,
                 final_bitcoin_price,
                 ..
-            } => Some(final_bitcoin_price - strike_price),
-            _ => None
-        };
-
-        if let Some(delta) = delta
-        {
-            let delta_string = format!(" Delta: {:+.2}", delta);
-
-            let delta_color = {
-                if delta.is_sign_positive()
+            } =>
+            {
+                let color = if (strike_price - final_bitcoin_price) > 0.0
                 {
-                    Color::Green
+                    Color32::RED
                 }
                 else
                 {
-                    Color::Red
-                }
-            };
-
-            (delta_string, delta_color)
+                    Color32::GREEN
+                };
+                ui.label(RichText::new("Market Resolved").color(color));
+            }
         }
-        else
-        {
-            (String::new(), Color::Magenta)
-        }
-    };
-
-    let (expiry_status_string, expiry_status_color) = match data
-    {
-        MarketRenderData::Active {
-            time_untill_expiry, ..
-        } =>
-        {
-            (
-                Cow::Owned(format!(
-                    " Market Expiring in {}.{}s",
-                    time_untill_expiry.num_seconds(),
-                    time_untill_expiry.num_milliseconds() % 1000
-                )),
-                if time_untill_expiry.as_seconds_f64() > 300.0
-                {
-                    Color::White
-                }
-                else if time_untill_expiry.as_seconds_f64() > 60.0
-                {
-                    Color::Yellow
-                }
-                else
-                {
-                    Color::Red
-                }
-            )
-        }
-        MarketRenderData::Resolving {
-            time_after_expiry, ..
-        } =>
-        {
-            (
-                Cow::Owned(format!(
-                    " Market Resolving {}.{}s elapsed",
-                    time_after_expiry.num_seconds(),
-                    time_after_expiry.num_milliseconds() % 1000
-                )),
-                Color::White
-            )
-        }
-        MarketRenderData::Resolved {
-            strike_price,
-            final_bitcoin_price,
-            ..
-        } =>
-        {
-            (
-                Cow::Borrowed(" Market Resolved"),
-                if (strike_price - final_bitcoin_price) > 0.0
-                {
-                    Color::Red
-                }
-                else
-                {
-                    Color::Green
-                }
-            )
-        }
-    };
-
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![Span::styled(
-                format!(
-                    " Kalshi {} minute terminal | {}",
-                    MARKET_INTERVAL_MINUTES,
-                    data.get_market_id()
-                ),
-                Style::default().fg(ratatui::style::Color::Magenta)
-            )]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled(strike_price_string, Style::default().fg(Color::Blue)),
-                Span::styled(bitcoin_price_string, Style::default().fg(Color::Yellow)),
-                Span::styled(delta_string, Style::default().fg(delta_color)),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                expiry_status_string,
-                Style::default().fg(expiry_status_color)
-            )),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::White))
-        ),
-        area
-    );
+    });
 }
 
-fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
+fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
 {
     let orderbook = match data
     {
@@ -318,7 +291,7 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         } => return
     };
 
-    // Asks are derived from No Bids (Negative Shares in our array).
+    // Asks
     let mut asks: Vec<(f64, i32)> = orderbook
         .data
         .iter()
@@ -326,8 +299,7 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         .filter_map(|(idx, &shares)| {
             if shares < 0
             {
-                let cents = index_to_dollars(idx).unwrap_or(0.0) * 100.0;
-                Some((cents, shares.abs()))
+                Some((index_to_dollars(idx).unwrap_or(0.0) * 100.0, shares.abs()))
             }
             else
             {
@@ -336,10 +308,9 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         })
         .take(8)
         .collect();
-
     asks.reverse();
 
-    // Bids are Yes Bids (Positive Shares).
+    // Bids
     let bids: Vec<(f64, i32)> = orderbook
         .data
         .iter()
@@ -348,8 +319,7 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
         .filter_map(|(idx, &shares)| {
             if shares > 0
             {
-                let cents = index_to_dollars(idx).unwrap_or(0.0) * 100.0;
-                Some((cents, shares))
+                Some((index_to_dollars(idx).unwrap_or(0.0) * 100.0, shares))
             }
             else
             {
@@ -361,180 +331,118 @@ fn render_orderbook(frame: &mut Frame, area: Rect, data: &MarketRenderData)
 
     let best_ask = asks.last().map(|(cents, _)| *cents);
     let best_bid = bids.first().map(|(cents, _)| *cents);
-
     let spread_s = match (best_ask, best_bid)
     {
-        (Some(ask), Some(bid)) =>
-        {
-            let spread = ask - bid;
-            if spread > 0.0
-            {
-                format!("{:>4.1}¢", spread)
-            }
-            else
-            {
-                " - ".to_string()
-            }
-        }
+        (Some(ask), Some(bid)) if ask - bid > 0.0 => format!("{:>4.1}¢", ask - bid),
         _ => " - ".to_string()
     };
 
-    // 33-character wide table layout
-    let empty = || {
-        Line::from(Span::styled(
-            "       -       │ -               ",
-            Style::default().fg(Color::DarkGray)
-        ))
-    };
-    let separator = Line::from(Span::styled(
-        "───────────────┼─────────────────",
-        Style::default().fg(Color::DarkGray)
-    ));
+    ui.group(|ui| {
+        Grid::new("orderbook_grid")
+            .striped(true)
+            .min_col_width(80.0)
+            .show(ui, |ui| {
+                // Header
+                ui.label(RichText::new("BUY / SELL").color(Color32::DARK_GRAY));
+                ui.label("");
+                ui.end_row();
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            " BUY   / SELL  │                 ",
-            Style::default().fg(Color::DarkGray)
-        )),
-        Line::from(Span::styled(
-            " YES ¢ / NO ¢  │ SIZE            ",
-            Style::default().fg(Color::DarkGray)
-        )),
-        separator.clone(),
-    ];
+                ui.label(RichText::new("YES ¢ / NO ¢").color(Color32::DARK_GRAY));
+                ui.label(RichText::new("SIZE").color(Color32::DARK_GRAY));
+                ui.end_row();
 
-    for _ in 0..8usize.saturating_sub(asks.len())
-    {
-        lines.push(empty());
-    }
+                // Asks (Red)
+                for _ in 0..8usize.saturating_sub(asks.len())
+                {
+                    ui.label(RichText::new("-").color(Color32::DARK_GRAY));
+                    ui.label(RichText::new("-").color(Color32::DARK_GRAY));
+                    ui.end_row();
+                }
+                for (cents, shares) in &asks
+                {
+                    ui.label(
+                        RichText::new(format!("{:>5.1} / {:<5.1}", cents, 100.0 - cents))
+                            .color(Color32::LIGHT_RED)
+                    );
+                    ui.label(RichText::new(format!("{}", shares)).color(Color32::LIGHT_RED));
+                    ui.end_row();
+                }
 
-    // Render Asks
-    for (cents, shares) in &asks
-    {
-        let no_cents = 100.0 - cents;
-        lines.push(Line::from(Span::styled(
-            format!(" {:>5.1} / {:<5.1} │ {:<16}", cents, no_cents, shares),
-            Style::default().fg(Color::LightRed)
-        )));
-    }
+                // Spread (Yellow)
+                ui.label(
+                    RichText::new(format!("SPREAD: {}", spread_s))
+                        .color(Color32::YELLOW)
+                        .strong()
+                );
+                ui.label("");
+                ui.end_row();
 
-    // Render Spread
-    lines.push(Line::from(Span::styled(
-        format!("── SPREAD: {:<5} ────────────────", spread_s),
-        Style::default().fg(Color::Yellow)
-    )));
+                // Bids (Green)
+                for (cents, shares) in &bids
+                {
+                    ui.label(
+                        RichText::new(format!("{:>5.1} / {:<5.1}", cents, 100.0 - cents))
+                            .color(Color32::LIGHT_GREEN)
+                    );
+                    ui.label(RichText::new(format!("{}", shares)).color(Color32::LIGHT_GREEN));
+                    ui.end_row();
+                }
+                for _ in 0..8usize.saturating_sub(bids.len())
+                {
+                    ui.label(RichText::new("-").color(Color32::DARK_GRAY));
+                    ui.label(RichText::new("-").color(Color32::DARK_GRAY));
+                    ui.end_row();
+                }
 
-    // Render Bids
-    for (cents, shares) in &bids
-    {
-        let no_cents = 100.0 - cents;
-        lines.push(Line::from(Span::styled(
-            format!(" {:>5.1} / {:<5.1} │ {:<16}", cents, no_cents, shares),
-            Style::default().fg(Color::LightGreen)
-        )));
-    }
+                // Footer
+                ui.label(RichText::new("YES ¢ / NO ¢").color(Color32::DARK_GRAY));
+                ui.label(RichText::new("SIZE").color(Color32::DARK_GRAY));
+                ui.end_row();
 
-    for _ in 0..8usize.saturating_sub(bids.len())
-    {
-        lines.push(empty());
-    }
-
-    lines.push(separator.clone());
-    lines.push(Line::from(Span::styled(
-        " YES ¢ / NO ¢  │ SIZE            ",
-        Style::default().fg(Color::DarkGray)
-    )));
-    lines.push(Line::from(Span::styled(
-        " SELL  /  BUY  │                 ",
-        Style::default().fg(Color::DarkGray)
-    )));
-
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::White))
-        ),
-        area
-    );
+                ui.label(RichText::new("SELL / BUY").color(Color32::DARK_GRAY));
+                ui.label("");
+                ui.end_row();
+            });
+    });
 }
 
-fn render_chart(frame: &mut Frame, area: Rect, data: &MarketRenderData)
+fn render_chart(ui: &mut Ui, data: &MarketRenderData)
 {
     let mut min_delta: Option<f64> = None;
     let mut max_delta: Option<f64> = None;
 
-    let data_to_render: Vec<(f64, f64)> = (0..DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE)
+    let points: PlotPoints = (0..DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE)
         .filter_map(|idx| {
             let delta = data.get_delta_history()[idx];
-
             if delta == 0.0
             {
                 return None;
             }
 
-            if let Some(v) = &mut min_delta
-            {
-                *v = v.min(delta);
-            }
-            else
-            {
-                min_delta = Some(delta);
-            }
+            min_delta = Some(min_delta.unwrap_or(delta).min(delta));
+            max_delta = Some(max_delta.unwrap_or(delta).max(delta));
 
-            if let Some(v) = &mut max_delta
-            {
-                *v = v.max(delta);
-            }
-            else
-            {
-                max_delta = Some(delta);
-            }
-
-            Some((
+            Some([
                 idx as f64 / DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE as f64,
                 delta
-            ))
+            ])
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    // Ensure 0.0 is always included in the Y-axis bounds
-    let min_delta = min_delta.unwrap_or(-1.0).min(-1.0);
-    let max_delta = max_delta.unwrap_or(1.0).max(1.0);
+    let min_d = min_delta.unwrap_or(-1.0).min(-1.0);
+    let max_d = max_delta.unwrap_or(1.0).max(1.0);
 
-    // The actual historical market data
-    let dataset = ratatui::widgets::Dataset::default()
-        .marker(ratatui::symbols::Marker::Braille)
-        .style(Style::default().fg(Color::Cyan))
-        .graph_type(ratatui::widgets::GraphType::Line)
-        .data(&data_to_render);
+    let line = Line::new("line", points).color(Color32::CYAN).width(2.0);
 
-    // The static yellow zero-line
-    let zero_line_data = [(0.0, 0.0), (1.0, 0.0)];
-    let zero_dataset = ratatui::widgets::Dataset::default()
-        .marker(ratatui::symbols::Marker::Braille)
-        .style(Style::default().fg(Color::Yellow))
-        .graph_type(ratatui::widgets::GraphType::Line)
-        .data(&zero_line_data);
-
-    frame.render_widget(
-        // Render the zero line first so the blue price line draws over top of it
-        ratatui::widgets::Chart::new(vec![zero_dataset, dataset])
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::White))
-                    .title(" Delta History (15m) ")
-            )
-            .x_axis(ratatui::widgets::Axis::default().bounds([0.0, 1.0]))
-            .y_axis(
-                ratatui::widgets::Axis::default()
-                    .bounds([min_delta, max_delta])
-                    .labels(vec![
-                        Span::raw(format!("{:.1}", min_delta)),
-                        Span::raw(format!("{:.1}", max_delta)),
-                    ])
-            ),
-        area
-    );
+    Plot::new("delta_history_plot")
+        .height(ui.available_height())
+        .show_axes([true, true])
+        .show_grid([true, true])
+        .include_y(min_d)
+        .include_y(max_d)
+        .show(ui, |plot_ui| {
+            // The static yellow zero-line
+            plot_ui.hline(HLine::new("hline", 0.0).color(Color32::YELLOW).width(1.5));
+            plot_ui.line(line);
+        });
 }
