@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use futures_util::StreamExt;
 use futures_util::sink::SinkExt;
 use reqwest::Client;
@@ -14,8 +14,8 @@ use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pss::BlindedSigningKey;
 use rsa::rand_core::OsRng;
 use rsa::signature::{RandomizedSigner, SignatureEncoding};
-use serde::{Deserialize, Deserializer};
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::json;
 use sha2::Sha256;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -25,7 +25,6 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-use super::*;
 use crate::kalshi::{KalshiMarketDescriptor, MarketTicker};
 use crate::shared::Orderbook;
 pub struct KalshiMarketReader

@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 
-use egui::{Color32, Grid, RichText, Ui, WidgetText};
-use egui_plot::{HLine, Line, Plot, PlotPoints, VLine};
+use egui::{Color32, Grid, RichText, Ui};
+use egui_plot::{HLine, Line, Plot, PlotPoints};
 
 use crate::shared::{
     DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE,
     DeltaHistory,
     MARKET_INTERVAL_MINUTES,
+    MARKET_INTERVAL_SECONDS,
     Orderbook,
     index_to_dollars
 };
@@ -275,7 +276,6 @@ fn render_header(ui: &mut Ui, data: &MarketRenderData)
         }
     });
 }
-
 fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
 {
     let orderbook = match data
@@ -338,7 +338,8 @@ fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
     };
 
     ui.group(|ui| {
-        Grid::new("orderbook_grid")
+        // FIX: Inject the unique market ID into the Grid identifier
+        Grid::new(format!("orderbook_grid_{}", data.get_market_id()))
             .striped(true)
             .min_col_width(80.0)
             .show(ui, |ui| {
@@ -422,10 +423,14 @@ fn render_chart(ui: &mut Ui, data: &MarketRenderData)
             min_delta = Some(min_delta.unwrap_or(delta).min(delta));
             max_delta = Some(max_delta.unwrap_or(delta).max(delta));
 
-            Some([
-                idx as f64 / DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE as f64,
-                delta
-            ])
+            // Map the array index range to a 0 to 900 seconds scale
+            let time_seconds = (idx as f64
+                / (DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE
+                    .saturating_sub(1)
+                    .max(1)) as f64)
+                * MARKET_INTERVAL_SECONDS as f64;
+
+            Some([time_seconds, delta])
         })
         .collect();
 
@@ -434,14 +439,19 @@ fn render_chart(ui: &mut Ui, data: &MarketRenderData)
 
     let line = Line::new("line", points).color(Color32::CYAN).width(2.0);
 
-    Plot::new("delta_history_plot")
+    Plot::new(format!("delta_history_plot_{}", data.get_market_id()))
         .height(ui.available_height())
         .show_axes([true, true])
         .show_grid([true, true])
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_scroll(false)
+        .set_margin_fraction(egui::Vec2::new(0.0, 0.05))
+        .include_x(0.0)
+        .include_x(900.0)
         .include_y(min_d)
         .include_y(max_d)
         .show(ui, |plot_ui| {
-            // The static yellow zero-line
             plot_ui.hline(HLine::new("hline", 0.0).color(Color32::YELLOW).width(1.5));
             plot_ui.line(line);
         });

@@ -56,7 +56,7 @@ impl BitcoinPriceGrabber
                                 e.status()
                             );
 
-                            if (fails > MAX_FAILS)
+                            if fails > MAX_FAILS
                             {
                                 panic!();
                             }
