@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::kalshi::{
     KalshiMarketDescriptor,
@@ -23,7 +24,15 @@ pub const DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE: usize =
 
 pub type CompleteOrderBookRecord = Box<[Orderbook; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]>;
 
-pub type DeltaHistory = Box<[f64; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]>;
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct TickData
+{
+    pub official_bitcoin_price: Option<f64>,
+    pub approx_bitcoin_price:   Option<f64>,
+    pub market_mid_cents:       Option<f64>
+}
+
+pub type TickHistory = Box<[TickData; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]>;
 
 /// Tapered-deci-cent#
 #[derive(Clone)]
@@ -44,13 +53,6 @@ impl Orderbook
         }
     }
 
-    // pub fn get_shares(&self, dollars: f64) -> i32
-    // {
-    //     self.data[get_index_of_dollars(dollars)
-    //         .with_context(|| format!("Tried to get index of ${dollars}"))
-    //         .unwrap()]
-    // }
-
     pub fn set_shares(&mut self, dollars: f64, shares: i32)
     {
         self.data[get_index_of_dollars(dollars)
@@ -63,6 +65,45 @@ impl Orderbook
         self.data[get_index_of_dollars(dollars)
             .with_context(|| format!("Tried to get index of ${dollars}"))
             .unwrap()] += shares;
+    }
+
+    pub fn get_best_ask_dollars(&self) -> Option<f64>
+    {
+        self.data.iter().enumerate().find_map(|(idx, &shares)| {
+            if shares < 0
+            {
+                index_to_dollars(idx)
+            }
+            else
+            {
+                None
+            }
+        })
+    }
+
+    pub fn get_best_bid_dollars(&self) -> Option<f64>
+    {
+        self.data
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, &shares)| {
+                if shares > 0
+                {
+                    index_to_dollars(idx)
+                }
+                else
+                {
+                    None
+                }
+            })
+    }
+
+    pub fn get_mid_cents(&self) -> Option<f64>
+    {
+        let ask = self.get_best_ask_dollars()?;
+        let bid = self.get_best_bid_dollars()?;
+        Some((ask + bid) / 2.0 * 100.0)
     }
 }
 
@@ -77,26 +118,19 @@ pub fn get_index_of_dollars(dollars: f64) -> Option<usize>
 
     match mils
     {
-        // Range 1: $0.000 to $0.100 (Step: $0.001)
         0..=100 => Some(mils as usize),
-
-        // Range 2: $0.110 to $0.890 (Step: $0.010)
         110..=890 =>
         {
-            // Must fall exactly on a $0.01 step (meaning mils must be a multiple of 10)
             if mils % 10 == 0
             {
                 Some(101 + ((mils - 110) / 10) as usize)
             }
             else
             {
-                None // Invalid step size, e.g., $0.115
+                None
             }
         }
-
-        // Range 3: $0.900 to $1.000 (Step: $0.001)
         900..=1000 => Some(180 + (mils - 900) as usize),
-
         _ => None
     }
 }
@@ -116,8 +150,8 @@ pub struct MarketBundle
 {
     pub communicator: KalshiMarketReader,
 
-    pub orderbook:     Orderbook,
-    pub delta_history: DeltaHistory,
+    pub orderbook:    Orderbook,
+    pub tick_history: TickHistory,
 
     pub ticker:       MarketTicker,
     pub close_time:   DateTime<Utc>,
@@ -136,22 +170,22 @@ impl MarketBundle
     ) -> MarketBundle
     {
         MarketBundle {
-            communicator:  KalshiMarketReader::new(
+            communicator: KalshiMarketReader::new(
                 descriptor.ticker.clone(),
                 state,
                 api_key_id,
                 priv_key_path
             ),
-            orderbook:     Orderbook::new(),
-            delta_history: vec![0.0; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]
+            orderbook:    Orderbook::new(),
+            tick_history: vec![TickData::default(); DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]
                 .into_boxed_slice()
                 .try_into()
                 .unwrap(),
-            ticker:        descriptor.ticker,
-            close_time:    descriptor.close_time,
-            strike_price:  descriptor.strike_price,
-            final_price:   descriptor.expiration_value,
-            status:        descriptor.status
+            ticker:       descriptor.ticker,
+            close_time:   descriptor.close_time,
+            strike_price: descriptor.strike_price,
+            final_price:  descriptor.expiration_value,
+            status:       descriptor.status
         }
     }
 

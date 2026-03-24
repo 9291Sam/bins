@@ -33,7 +33,6 @@ struct KalshiApp
     api_key_id:                 String,
     priv_key_path:              String,
 
-    // Tracks ongoing async network requests so we don't spam the API while waiting
     market_fetch_rx: Option<tokio::sync::oneshot::Receiver<PreviousCurrentAndNextMarkets>>
 }
 
@@ -59,7 +58,7 @@ fn create_render_data_from_bundle<'a>(
                 market_id: bundle.ticker.0.clone(),
                 time_untill_expiry: bundle.close_time - now,
                 orderbook: bundle.orderbook.clone(),
-                delta_history: &bundle.delta_history,
+                tick_history: &bundle.tick_history,
                 approximated_bitcoin_price
             }
         }
@@ -70,7 +69,7 @@ fn create_render_data_from_bundle<'a>(
                 market_id:         bundle.ticker.0.clone(),
                 time_after_expiry: now - bundle.close_time,
                 orderbook:         bundle.orderbook.clone(),
-                delta_history:     &bundle.delta_history
+                tick_history:      &bundle.tick_history
             }
         }
         MarketPollState::Resolved =>
@@ -79,7 +78,7 @@ fn create_render_data_from_bundle<'a>(
                 strike_price:        bundle.strike_price.unwrap(),
                 final_bitcoin_price: bundle.final_price.unwrap(),
                 market_id:           bundle.ticker.0.clone(),
-                delta_history:       &bundle.delta_history
+                tick_history:        &bundle.tick_history
             }
         }
     }
@@ -105,10 +104,10 @@ impl eframe::App for KalshiApp
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) =>
                 {
-                    fetch_ready = true; // The task dropped/failed, clear the lock
+                    fetch_ready = true;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) =>
-                {} // Still fetching
+                {}
             }
         }
 
@@ -168,8 +167,6 @@ impl eframe::App for KalshiApp
                 .set_poll_state(MarketPollState::RightBeforeActive);
         }
 
-        // If current is closed AND we aren't already fetching the next cycle, spawn the
-        // fetch task
         if (now - self.current.close_time) > TimeDelta::zero() && self.market_fetch_rx.is_none()
         {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -201,18 +198,19 @@ impl eframe::App for KalshiApp
         let delta_ticks_along_current =
             (time_along_current_seconds / SAVING_INTERVAL_SECONDS) as usize;
 
-        if let Some(s) = self.current.strike_price
+        if delta_ticks_along_current < self.current.tick_history.len()
         {
-            if self.real_bitcoin_price != 0.0
+            let tick = &mut self.current.tick_history[delta_ticks_along_current];
+
+            if self.real_bitcoin_price > 0.0
             {
-                // Bounds check added to ensure the immediate-mode GUI thread never panics on a
-                // misaligned tick
-                if delta_ticks_along_current < self.current.delta_history.len()
-                {
-                    self.current.delta_history[delta_ticks_along_current] =
-                        self.real_bitcoin_price - s;
-                }
+                tick.official_bitcoin_price = Some(self.real_bitcoin_price);
             }
+            if self.approximated_bitcoin_price > 0.0
+            {
+                tick.approx_bitcoin_price = Some(self.approximated_bitcoin_price);
+            }
+            tick.market_mid_cents = self.current.orderbook.get_mid_cents();
         }
 
         // 4. Render UI
@@ -239,13 +237,11 @@ impl eframe::App for KalshiApp
             });
         });
 
-        // 5. Force the loop to continue (equates to the `TIME_BETWEEN_UPDATE_TICKS_MS`
-        //    timer)
+        // 5. Force the loop to continue
         ctx.request_repaint_after(Duration::from_millis(25));
     }
 }
 
-// Notice main is no longer #[tokio::main]
 fn main() -> eframe::Result<()>
 {
     let _meth = Meth::new();
@@ -256,17 +252,13 @@ fn main() -> eframe::Result<()>
     let priv_key_path =
         env::var("KALSHI_PRIVATE_KEY_PATH").expect("Missing KALSHI_PRIVATE_KEY_PATH");
 
-    // Manually create the multi-threaded tokio runtime
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("Failed to construct tokio runtime");
 
-    // Enter the runtime context. This ensures that any `tokio::spawn` calls
-    // inside `MarketBundle::new` or `BitcoinPriceGrabber::new` function correctly.
     let _guard = rt.enter();
 
-    // Blocking initialization
     let (next, current, previous) = rt.block_on(async {
         let PreviousCurrentAndNextMarkets {
             next_market,
@@ -299,7 +291,7 @@ fn main() -> eframe::Result<()>
     let bitcoin_price_grabber = BitcoinPriceGrabber::new();
 
     let app = KalshiApp {
-        rt, // Pass ownership of the runtime into the app so it stays alive
+        rt,
         next,
         current,
         previous,

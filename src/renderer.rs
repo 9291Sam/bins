@@ -1,14 +1,14 @@
 use std::borrow::Cow;
 
 use egui::{Color32, Grid, RichText, Ui};
-use egui_plot::{HLine, Line, Plot, PlotPoints};
+use egui_plot::{HLine, Line, Plot};
 
 use crate::shared::{
     DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE,
-    DeltaHistory,
     MARKET_INTERVAL_MINUTES,
     MARKET_INTERVAL_SECONDS,
     Orderbook,
+    TickHistory,
     index_to_dollars
 };
 
@@ -22,7 +22,7 @@ pub enum MarketRenderData<'a>
         market_id:                  String,
         time_untill_expiry:         chrono::Duration,
         orderbook:                  Orderbook,
-        delta_history:              &'a DeltaHistory
+        tick_history:               &'a TickHistory
     },
     Resolving
     {
@@ -30,14 +30,14 @@ pub enum MarketRenderData<'a>
         market_id:         String,
         time_after_expiry: chrono::Duration,
         orderbook:         Orderbook,
-        delta_history:     &'a DeltaHistory
+        tick_history:      &'a TickHistory
     },
     Resolved
     {
         strike_price:        f64,
         final_bitcoin_price: f64,
         market_id:           String,
-        delta_history:       &'a DeltaHistory
+        tick_history:        &'a TickHistory
     }
 }
 
@@ -75,19 +75,19 @@ impl<'a> MarketRenderData<'a>
         }
     }
 
-    pub fn get_delta_history(&'a self) -> &'a DeltaHistory
+    pub fn get_tick_history(&'a self) -> &'a TickHistory
     {
         match self
         {
             MarketRenderData::Active {
-                delta_history, ..
+                tick_history, ..
             }
             | MarketRenderData::Resolving {
-                delta_history, ..
+                tick_history, ..
             }
             | MarketRenderData::Resolved {
-                delta_history, ..
-            } => delta_history
+                tick_history, ..
+            } => tick_history
         }
     }
 }
@@ -276,6 +276,7 @@ fn render_header(ui: &mut Ui, data: &MarketRenderData)
         }
     });
 }
+
 fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
 {
     let orderbook = match data
@@ -338,7 +339,6 @@ fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
     };
 
     ui.group(|ui| {
-        // FIX: Inject the unique market ID into the Grid identifier
         Grid::new(format!("orderbook_grid_{}", data.get_market_id()))
             .striped(true)
             .min_col_width(80.0)
@@ -409,37 +409,99 @@ fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
 
 fn render_chart(ui: &mut Ui, data: &MarketRenderData)
 {
-    let mut min_delta: Option<f64> = None;
-    let mut max_delta: Option<f64> = None;
+    let history = data.get_tick_history();
+    let strike = data.get_strike_price();
 
-    let points: PlotPoints = (0..DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE)
-        .filter_map(|idx| {
-            let delta = data.get_delta_history()[idx];
-            if delta == 0.0
-            {
-                return None;
-            }
+    let mut mid_points = vec![];
+    let mut official_points = vec![];
+    let mut approx_points = vec![];
 
-            min_delta = Some(min_delta.unwrap_or(delta).min(delta));
-            max_delta = Some(max_delta.unwrap_or(delta).max(delta));
+    let mut min_btc = f64::MAX;
+    let mut max_btc = f64::MIN;
 
-            // Map the array index range to a 0 to 900 seconds scale
-            let time_seconds = (idx as f64
-                / (DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE
-                    .saturating_sub(1)
-                    .max(1)) as f64)
-                * MARKET_INTERVAL_SECONDS as f64;
+    for (idx, tick) in history.iter().enumerate()
+    {
+        let time_seconds = (idx as f64
+            / (DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE
+                .saturating_sub(1)
+                .max(1)) as f64)
+            * MARKET_INTERVAL_SECONDS as f64;
 
-            Some([time_seconds, delta])
-        })
-        .collect();
+        if let Some(mid) = tick.market_mid_cents
+        {
+            mid_points.push([time_seconds, mid]);
+        }
+        if let Some(off) = tick.official_bitcoin_price
+        {
+            official_points.push([time_seconds, off]);
+            min_btc = min_btc.min(off);
+            max_btc = max_btc.max(off);
+        }
+        if let Some(app) = tick.approx_bitcoin_price
+        {
+            approx_points.push([time_seconds, app]);
+            min_btc = min_btc.min(app);
+            max_btc = max_btc.max(app);
+        }
+    }
 
-    let min_d = min_delta.unwrap_or(-1.0).min(-1.0);
-    let max_d = max_delta.unwrap_or(1.0).max(1.0);
+    if let Some(s) = strike
+    {
+        min_btc = min_btc.min(s);
+        max_btc = max_btc.max(s);
+    }
 
-    let line = Line::new("line", points).color(Color32::CYAN).width(2.0);
+    // Safe bounds if data is empty or too tight
+    if min_btc == f64::MAX
+    {
+        min_btc = 0.0;
+        max_btc = 100000.0;
+    }
+    else
+    {
+        let pad = (max_btc - min_btc).max(10.0) * 0.1;
+        min_btc -= pad;
+        max_btc += pad;
+    }
 
-    Plot::new(format!("delta_history_plot_{}", data.get_market_id()))
+    let available_height = ui.available_height();
+    let plot_height = (available_height / 2.0) - 16.0;
+
+    // Top Plot: Market Midpoint
+    ui.label(
+        RichText::new("Market Midpoint (¢)")
+            .color(Color32::LIGHT_BLUE)
+            .small()
+    );
+    Plot::new(format!("mid_plot_{}", data.get_market_id()))
+        .height(plot_height)
+        .show_axes([true, true])
+        .show_grid([true, true])
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_scroll(false)
+        .set_margin_fraction(egui::Vec2::new(0.0, 0.05))
+        .include_x(0.0)
+        .include_x(900.0)
+        .include_y(0.0)
+        .include_y(100.0)
+        .show(ui, |plot_ui| {
+            plot_ui.line(
+                Line::new("mid", mid_points)
+                    .color(Color32::LIGHT_BLUE)
+                    .width(1.5)
+            );
+        });
+
+    ui.add_space(8.0);
+
+    // Bottom Plot: Bitcoin Prices
+    ui.label(
+        RichText::new("Bitcoin Price ($)")
+            .color(Color32::YELLOW)
+            .small()
+    );
+    Plot::new(format!("btc_price_plot_{}", data.get_market_id()))
         .height(ui.available_height())
         .show_axes([true, true])
         .show_grid([true, true])
@@ -449,10 +511,22 @@ fn render_chart(ui: &mut Ui, data: &MarketRenderData)
         .set_margin_fraction(egui::Vec2::new(0.0, 0.05))
         .include_x(0.0)
         .include_x(900.0)
-        .include_y(min_d)
-        .include_y(max_d)
+        .include_y(min_btc)
+        .include_y(max_btc)
         .show(ui, |plot_ui| {
-            plot_ui.hline(HLine::new("hline", 0.0).color(Color32::YELLOW).width(1.5));
-            plot_ui.line(line);
+            if let Some(s) = strike
+            {
+                plot_ui.hline(HLine::new("strike", s).color(Color32::YELLOW).width(1.5));
+            }
+            plot_ui.line(
+                Line::new("approx", approx_points)
+                    .color(Color32::GRAY)
+                    .width(1.0)
+            );
+            plot_ui.line(
+                Line::new("official", official_points)
+                    .color(Color32::CYAN)
+                    .width(2.0)
+            );
         });
 }
