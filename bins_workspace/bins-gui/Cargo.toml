@@ -1,0 +1,14 @@
+[package]
+name = "bins-gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bins-core = { path = "../bins-core" }
+bins-feed = { path = "../bins-feed" }
+chrono = { version = "0.4.44", features = ["serde"] }
+eframe = "0.33.3"
+egui = "0.33.3"
+egui_plot = "0.34.1"
+reqwest = { version = "0.13.2" }
+tokio = { version = "1.50.0", features = ["full", "sync"] }

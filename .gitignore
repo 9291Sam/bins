@@ -7,3 +7,5 @@ data.txt
 logs
 out.txt
 .DS_Store
+market_data/*
+market_data
