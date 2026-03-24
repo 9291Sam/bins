@@ -16,6 +16,5 @@ fn main() -> bins_gui::eframe::Result<()>
         .build()
         .expect("Failed to construct tokio runtime");
 
-    // Offload all the heavy lifting to the GUI crate
     bins_gui::run_desktop_app(api_key_id, priv_key_path, rt)
 }

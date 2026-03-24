@@ -192,7 +192,6 @@ fn render_header(ui: &mut Ui, data: &MarketRenderData)
                 {}
             }
 
-            // Delta Calculation
             let delta: Option<f64> = match data
             {
                 MarketRenderData::Active {
@@ -224,7 +223,6 @@ fn render_header(ui: &mut Ui, data: &MarketRenderData)
 
         ui.add_space(4.0);
 
-        // Expiry Status
         match data
         {
             MarketRenderData::Active {
@@ -302,7 +300,6 @@ fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
         } => return
     };
 
-    // Asks
     let mut asks: Vec<(f64, i32)> = orderbook
         .data
         .iter()
@@ -321,7 +318,6 @@ fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
         .collect();
     asks.reverse();
 
-    // Bids
     let bids: Vec<(f64, i32)> = orderbook
         .data
         .iter()
@@ -353,7 +349,6 @@ fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
             .striped(true)
             .min_col_width(80.0)
             .show(ui, |ui| {
-                // Header
                 ui.label(RichText::new("BUY / SELL").color(Color32::DARK_GRAY));
                 ui.label("");
                 ui.end_row();
@@ -362,7 +357,6 @@ fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
                 ui.label(RichText::new("SIZE").color(Color32::DARK_GRAY));
                 ui.end_row();
 
-                // Asks (Red)
                 for _ in 0..8usize.saturating_sub(asks.len())
                 {
                     ui.label(RichText::new("-").color(Color32::DARK_GRAY));
@@ -379,7 +373,6 @@ fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
                     ui.end_row();
                 }
 
-                // Spread (Yellow)
                 ui.label(
                     RichText::new(format!("SPREAD: {}", spread_s))
                         .color(Color32::YELLOW)
@@ -388,7 +381,6 @@ fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
                 ui.label("");
                 ui.end_row();
 
-                // Bids (Green)
                 for (cents, shares) in &bids
                 {
                     ui.label(
@@ -405,7 +397,6 @@ fn render_orderbook(ui: &mut Ui, data: &MarketRenderData)
                     ui.end_row();
                 }
 
-                // Footer
                 ui.label(RichText::new("YES ¢ / NO ¢").color(Color32::DARK_GRAY));
                 ui.label(RichText::new("SIZE").color(Color32::DARK_GRAY));
                 ui.end_row();
@@ -432,10 +423,8 @@ fn render_chart(ui: &mut Ui, data: &MarketRenderData)
 
     for tick in history.iter()
     {
-        // Relative seconds since the market 15 minute block began
         let time_seconds = (tick.timestamp_ms - start_time_ms) as f64 / 1000.0;
 
-        // O(1) Cache read!
         if let Some(mid) = tick.market_mid_cents
         {
             mid_points.push([time_seconds, mid]);
@@ -460,7 +449,6 @@ fn render_chart(ui: &mut Ui, data: &MarketRenderData)
         max_btc = max_btc.max(s);
     }
 
-    // Safe bounds if data is empty or too tight
     if min_btc == f64::MAX
     {
         min_btc = 0.0;
@@ -476,7 +464,6 @@ fn render_chart(ui: &mut Ui, data: &MarketRenderData)
     let available_height = ui.available_height();
     let plot_height = (available_height / 2.0) - 16.0;
 
-    // Top Plot: Market Midpoint
     ui.label(
         RichText::new("Market Midpoint (¢)")
             .color(Color32::LIGHT_BLUE)
@@ -504,7 +491,6 @@ fn render_chart(ui: &mut Ui, data: &MarketRenderData)
 
     ui.add_space(8.0);
 
-    // Bottom Plot: Bitcoin Prices
     ui.label(
         RichText::new("Bitcoin Price ($)")
             .color(Color32::YELLOW)
