@@ -1,7 +1,10 @@
-use std::time::Duration;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 use crate::kalshi::{
@@ -16,26 +19,57 @@ use crate::kalshi::{
 pub const MARKET_INTERVAL_MINUTES: usize = 15;
 pub const MARKET_INTERVAL_SECONDS: usize = MARKET_INTERVAL_MINUTES * 60;
 
-pub const SAVING_INTERVAL_HZ: usize = 4;
-pub const SAVING_INTERVAL_SECONDS: f64 = 1.0 / (SAVING_INTERVAL_HZ as f64);
-
-pub const DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE: usize =
-    SAVING_INTERVAL_HZ * MARKET_INTERVAL_SECONDS;
-
-pub type CompleteOrderBookRecord = Box<[Orderbook; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]>;
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct TickData
+// The atomic event payload for sparse logging
+#[derive(Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct MarketTick
 {
+    pub timestamp_ms:           i64,
     pub official_bitcoin_price: Option<f64>,
     pub approx_bitcoin_price:   Option<f64>,
-    pub market_mid_cents:       Option<f64>
+    pub market_mid_cents:       Option<f64>,
+    pub orderbook:              Orderbook
 }
 
-pub type TickHistory = Box<[TickData; DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]>;
+// rkyv archive format
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct MarketArchive
+{
+    pub ticker:        String,
+    pub close_time_ts: i64,
+    pub strike_price:  f64,
+    pub final_price:   f64,
+    pub tick_history:  Vec<MarketTick>
+}
+
+impl MarketArchive
+{
+    pub fn save_to_disk(bundle: &MarketBundle, directory: &str) -> Result<()>
+    {
+        let archive = MarketArchive {
+            ticker:        bundle.ticker.0.clone(),
+            close_time_ts: bundle.close_time.timestamp(),
+            strike_price:  bundle.strike_price.unwrap_or(0.0),
+            final_price:   bundle.final_price.unwrap_or(0.0),
+            tick_history:  bundle.tick_history.clone()
+        };
+
+        std::fs::create_dir_all(directory)?;
+
+        let filename = format!("{}_{}.kalshi.rkyv", archive.ticker, archive.close_time_ts);
+        let filepath = Path::new(directory).join(filename);
+
+        let bytes = rkyv::to_bytes::<rkyv::rancor::BoxedError>(&archive)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize with rkyv: {}", e))?;
+
+        let mut file = File::create(filepath)?;
+        file.write_all(&bytes)?;
+
+        Ok(())
+    }
+}
 
 /// Tapered-deci-cent#
-#[derive(Clone)]
+#[derive(Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct Orderbook
 {
     // 0..=100   (101 slots) -> [$0.000, $0.100] (0.001 step)
@@ -151,7 +185,7 @@ pub struct MarketBundle
     pub communicator: KalshiMarketReader,
 
     pub orderbook:    Orderbook,
-    pub tick_history: TickHistory,
+    pub tick_history: Vec<MarketTick>,
 
     pub ticker:       MarketTicker,
     pub close_time:   DateTime<Utc>,
@@ -166,7 +200,8 @@ impl MarketBundle
         descriptor: KalshiMarketDescriptor,
         state: MarketPollState,
         api_key_id: String,
-        priv_key_path: String
+        priv_key_path: String,
+        ctx: egui::Context
     ) -> MarketBundle
     {
         MarketBundle {
@@ -174,13 +209,11 @@ impl MarketBundle
                 descriptor.ticker.clone(),
                 state,
                 api_key_id,
-                priv_key_path
+                priv_key_path,
+                ctx
             ),
             orderbook:    Orderbook::new(),
-            tick_history: vec![TickData::default(); DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE]
-                .into_boxed_slice()
-                .try_into()
-                .unwrap(),
+            tick_history: Vec::new(),
             ticker:       descriptor.ticker,
             close_time:   descriptor.close_time,
             strike_price: descriptor.strike_price,
@@ -200,7 +233,7 @@ impl MarketBundle
 
     pub fn get_start_time(&self) -> DateTime<Utc>
     {
-        self.close_time - Duration::from_mins(15)
+        self.close_time - std::time::Duration::from_secs(MARKET_INTERVAL_SECONDS as u64)
     }
 
     pub fn apply_event(&mut self, event: MarketStreamEvent)

@@ -32,7 +32,6 @@ pub enum KalshiMarketStatus
 #[serde(transparent)]
 pub struct MarketTicker(pub String);
 
-// https://docs.kalshi.com/api-reference/market/get-market
 #[derive(Debug, Clone, Deserialize)]
 pub struct KalshiMarketDescriptor
 {
@@ -45,8 +44,7 @@ pub struct KalshiMarketDescriptor
         default,
         deserialize_with = "super::deserialize_optional_stringified_float"
     )]
-    pub expiration_value: Option<f64> /* pub price_level_structure: String,
-                                       * pub price_ranges:          Vec<Value> */
+    pub expiration_value: Option<f64>
 }
 
 pub struct PreviousCurrentAndNextMarkets
@@ -76,11 +74,6 @@ pub async fn poll_previous_current_and_next_market(
         })
         .map(|(idx, _)| idx)
         .expect("no market");
-
-    // println!(
-    //     "{} | {:?}",
-    //     markets[0].price_level_structure, markets[0].price_ranges
-    // );
 
     let mut adjacent_markets =
         markets.drain(index_of_current_market - 1..=index_of_current_market + 1);

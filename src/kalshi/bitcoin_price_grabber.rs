@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use eframe::egui;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -24,12 +25,13 @@ pub struct BitcoinPriceGrabber
 
 impl BitcoinPriceGrabber
 {
-    pub fn new() -> BitcoinPriceGrabber
+    pub fn new(ctx: egui::Context) -> BitcoinPriceGrabber
     {
         let (price_updates_tx, price_updates_rx) = unbounded_channel();
 
         {
             let price_updates_tx = price_updates_tx.clone();
+            let ctx = ctx.clone();
 
             tokio::spawn(async move {
                 let client = Client::new();
@@ -44,7 +46,6 @@ impl BitcoinPriceGrabber
                         Ok(r) =>
                         {
                             fails = 0;
-
                             r
                         }
                         Err(e) =>
@@ -75,11 +76,17 @@ impl BitcoinPriceGrabber
                         .and_then(|a| a.as_array())
                         .and_then(|a| a.last())
                         .and_then(|v| v.as_f64())
-                        && price_updates_tx
-                            .send(BitcoinPriceUpdate::Official(price))
-                            .is_err()
                     {
-                        break;
+                        if price_updates_tx
+                            .send(BitcoinPriceUpdate::Official(price))
+                            .is_ok()
+                        {
+                            ctx.request_repaint();
+                        }
+                        else
+                        {
+                            break;
+                        }
                     }
 
                     tokio::time::sleep(Duration::from_millis(1100)).await;
@@ -89,6 +96,7 @@ impl BitcoinPriceGrabber
 
         {
             let price_updates_tx = price_updates_tx.clone();
+            let ctx = ctx.clone();
 
             tokio::spawn(async move {
                 let url = UNOFFICIAL_BITCOIN_ENDPOINT;
@@ -117,11 +125,17 @@ impl BitcoinPriceGrabber
                         if parsed["type"] == "ticker"
                             && let Some(price_str) = parsed["price"].as_str()
                             && let Ok(p) = price_str.parse::<f64>()
-                            && price_updates_tx
-                                .send(BitcoinPriceUpdate::Approximated(p))
-                                .is_err()
                         {
-                            break;
+                            if price_updates_tx
+                                .send(BitcoinPriceUpdate::Approximated(p))
+                                .is_ok()
+                            {
+                                ctx.request_repaint();
+                            }
+                            else
+                            {
+                                break;
+                            }
                         }
                     }
                 }

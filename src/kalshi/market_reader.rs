@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::Utc;
+use eframe::egui;
 use futures_util::StreamExt;
 use futures_util::sink::SinkExt;
 use reqwest::Client;
@@ -27,6 +28,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::kalshi::{KalshiMarketDescriptor, MarketTicker};
 use crate::shared::Orderbook;
+
 pub struct KalshiMarketReader
 {
     state_cache: MarketPollState,
@@ -40,7 +42,8 @@ impl KalshiMarketReader
         ticker: MarketTicker,
         initial_state: MarketPollState,
         api_key_id: String,
-        priv_key_path: String
+        priv_key_path: String,
+        ctx: egui::Context
     ) -> KalshiMarketReader
     {
         let (input_tx, mut input_rx) = unbounded_channel();
@@ -53,6 +56,7 @@ impl KalshiMarketReader
             let api_key_id = api_key_id;
             let priv_key_path = priv_key_path;
             let mut state = task_state;
+            let ctx = ctx.clone();
 
             const TIME_BETWEEN_RESOLVE_POLLS_MS: u64 = 1000;
             const TIME_BETWEEN_TICKS_MS: u64 = 25;
@@ -67,7 +71,8 @@ impl KalshiMarketReader
 
             fn handle_incoming_websocket_message(
                 message: String,
-                output_tx: &mut UnboundedSender<MarketStreamEvent>
+                output_tx: &mut UnboundedSender<MarketStreamEvent>,
+                ctx: &egui::Context
             )
             {
                 if let Ok(ws_msg) = serde_json::from_str::<KalshiWsMessage>(&message.to_string())
@@ -99,6 +104,7 @@ impl KalshiMarketReader
                             }
 
                             let _ = output_tx.send(MarketStreamEvent::OrderbookSnapshot(snapshot));
+                            ctx.request_repaint();
                         }
                         KalshiWsMessage::OrderbookDelta {
                             msg:
@@ -123,6 +129,7 @@ impl KalshiMarketReader
                                 price_dollars: aligned_price,
                                 size_delta
                             });
+                            ctx.request_repaint();
                         }
                         _ =>
                         {}
@@ -169,9 +176,9 @@ impl KalshiMarketReader
                                         &rest_client, now
                                     ).await;
 
-                                    output_tx.send(
-                                        MarketStreamEvent::NewDescriptors(nearby_markets)
-                                    ).unwrap();
+                                    if output_tx.send(MarketStreamEvent::NewDescriptors(nearby_markets)).is_ok() {
+                                        ctx.request_repaint();
+                                    }
                                 }
                         };
 
@@ -208,7 +215,8 @@ impl KalshiMarketReader
                             Some(Ok(message)) => {
                                 handle_incoming_websocket_message(
                                     message.to_string(),
-                                    &mut output_tx
+                                    &mut output_tx,
+                                    &ctx
                                 );
                             }
                             Some(Err(e)) => {
@@ -241,7 +249,6 @@ impl KalshiMarketReader
         self.state_cache.clone()
     }
 
-    // pub fn subscribe
     pub fn get_receiver(&mut self) -> &mut UnboundedReceiver<MarketStreamEvent>
     {
         &mut self.output_rx
@@ -252,25 +259,16 @@ impl KalshiMarketReader
 #[serde(tag = "type")]
 enum KalshiWsMessage
 {
-    // #[serde(rename = "subscribed")]
-    // Subscribed
-    // {
-    //     id: i64
-    // },
     #[serde(rename = "orderbook_snapshot")]
     OrderbookSnapshot
     {
-        // sid: i64,
-        // seq: i64,
         msg: SnapshotMsg
     },
     #[serde(rename = "orderbook_delta")]
     OrderbookDelta
     {
-        // sid: i64, seq: i64,
         msg: DeltaMsg
     },
-    // Failsafe for unhandled Kalshi socket events (like heartbeats)
     #[serde(other)]
     Unknown
 }
@@ -278,9 +276,6 @@ enum KalshiWsMessage
 #[derive(Debug, Deserialize)]
 struct SnapshotMsg
 {
-    // pub market_ticker:  String,
-    // pub market_id:      String,
-    // default handles the edge case where the orderbook is completely empty
     #[serde(default)]
     pub yes_dollars_fp: Vec<[String; 2]>,
     #[serde(default)]
@@ -299,8 +294,6 @@ enum KalshiMarketSide
 #[derive(Debug, Deserialize)]
 struct DeltaMsg
 {
-    // pub market_ticker: String,
-    // pub market_id:     String,
     #[serde(default, deserialize_with = "super::deserialize_stringified_float")]
     pub price_dollars: f64,
     #[serde(default, deserialize_with = "super::deserialize_stringified_float")]

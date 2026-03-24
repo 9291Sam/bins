@@ -15,7 +15,7 @@ use reqwest::Client;
 
 use crate::kalshi::KalshiMarketStatus;
 use crate::renderer::{MarketRenderData, render_market};
-use crate::shared::{MarketBundle, SAVING_INTERVAL_SECONDS};
+use crate::shared::{MarketArchive, MarketBundle, MarketTick};
 
 mod kalshi;
 mod renderer;
@@ -44,6 +44,7 @@ fn create_render_data_from_bundle<'a>(
 ) -> MarketRenderData<'a>
 {
     let state = bundle.communicator.get_poll_state();
+    let start_time = bundle.get_start_time();
 
     match state
     {
@@ -59,26 +60,29 @@ fn create_render_data_from_bundle<'a>(
                 time_untill_expiry: bundle.close_time - now,
                 orderbook: bundle.orderbook.clone(),
                 tick_history: &bundle.tick_history,
-                approximated_bitcoin_price
+                approximated_bitcoin_price,
+                start_time
             }
         }
         MarketPollState::ActivelyTryingToResolve =>
         {
             MarketRenderData::Resolving {
-                strike_price:      bundle.strike_price,
-                market_id:         bundle.ticker.0.clone(),
+                strike_price: bundle.strike_price,
+                market_id: bundle.ticker.0.clone(),
                 time_after_expiry: now - bundle.close_time,
-                orderbook:         bundle.orderbook.clone(),
-                tick_history:      &bundle.tick_history
+                orderbook: bundle.orderbook.clone(),
+                tick_history: &bundle.tick_history,
+                start_time
             }
         }
         MarketPollState::Resolved =>
         {
             MarketRenderData::Resolved {
-                strike_price:        bundle.strike_price.unwrap(),
-                final_bitcoin_price: bundle.final_price.unwrap(),
-                market_id:           bundle.ticker.0.clone(),
-                tick_history:        &bundle.tick_history
+                strike_price: bundle.strike_price.unwrap_or(0.0),
+                final_bitcoin_price: bundle.final_price.unwrap_or(0.0),
+                market_id: bundle.ticker.0.clone(),
+                tick_history: &bundle.tick_history,
+                start_time
             }
         }
     }
@@ -89,6 +93,7 @@ impl eframe::App for KalshiApp
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame)
     {
         let now = Utc::now();
+        let mut current_state_changed = false;
 
         // 1. Resolve pending async market fetches
         let mut fetch_ready = false;
@@ -116,11 +121,14 @@ impl eframe::App for KalshiApp
             self.market_fetch_rx = None;
             if let Some(markets) = new_markets
             {
+                let _guard = self.rt.enter();
+
                 let new_next = MarketBundle::new(
                     markets.next_market,
                     MarketPollState::FarBeforeActive,
                     self.api_key_id.clone(),
-                    self.priv_key_path.clone()
+                    self.priv_key_path.clone(),
+                    ctx.clone()
                 );
 
                 std::mem::swap(&mut self.previous, &mut self.current);
@@ -144,6 +152,7 @@ impl eframe::App for KalshiApp
         while let Ok(e) = self.current.communicator.get_receiver().try_recv()
         {
             self.current.apply_event(e);
+            current_state_changed = true;
         }
         while let Ok(e) = self.previous.communicator.get_receiver().try_recv()
         {
@@ -156,6 +165,7 @@ impl eframe::App for KalshiApp
                 BitcoinPriceUpdate::Official(o) => self.real_bitcoin_price = o,
                 BitcoinPriceUpdate::Approximated(a) => self.approximated_bitcoin_price = a
             }
+            current_state_changed = true;
         }
 
         // 3. Tick state updates
@@ -177,6 +187,7 @@ impl eframe::App for KalshiApp
             self.market_fetch_rx = Some(rx);
         }
 
+        // 3.5 Archiving: Save to disk when previous market finalizes
         if self.previous.communicator.get_poll_state() == MarketPollState::ActivelyTryingToResolve
             && (self.previous.status == KalshiMarketStatus::Determined
                 || self.previous.status == KalshiMarketStatus::Finalized)
@@ -184,6 +195,21 @@ impl eframe::App for KalshiApp
             self.previous
                 .communicator
                 .set_poll_state(MarketPollState::Resolved);
+
+            if let Err(e) = MarketArchive::save_to_disk(&self.previous, "./market_data")
+            {
+                eprintln!(
+                    "Failed to save market archive for {}: {:?}",
+                    self.previous.ticker.0, e
+                );
+            }
+            else
+            {
+                println!(
+                    "Successfully archived market {} to disk.",
+                    self.previous.ticker.0
+                );
+            }
         }
 
         if self.current.communicator.get_poll_state() == MarketPollState::ActiveLookingForStrike
@@ -194,23 +220,33 @@ impl eframe::App for KalshiApp
                 .set_poll_state(MarketPollState::ActiveKnownStrike);
         }
 
-        let time_along_current_seconds = (now - self.current.get_start_time()).as_seconds_f64();
-        let delta_ticks_along_current =
-            (time_along_current_seconds / SAVING_INTERVAL_SECONDS) as usize;
-
-        if delta_ticks_along_current < self.current.tick_history.len()
+        // 3.6 Sparse Logging: Only record tick if a state physically updated
+        if current_state_changed
         {
-            let tick = &mut self.current.tick_history[delta_ticks_along_current];
+            let off_price = if self.real_bitcoin_price > 0.0
+            {
+                Some(self.real_bitcoin_price)
+            }
+            else
+            {
+                None
+            };
+            let app_price = if self.approximated_bitcoin_price > 0.0
+            {
+                Some(self.approximated_bitcoin_price)
+            }
+            else
+            {
+                None
+            };
 
-            if self.real_bitcoin_price > 0.0
-            {
-                tick.official_bitcoin_price = Some(self.real_bitcoin_price);
-            }
-            if self.approximated_bitcoin_price > 0.0
-            {
-                tick.approx_bitcoin_price = Some(self.approximated_bitcoin_price);
-            }
-            tick.market_mid_cents = self.current.orderbook.get_mid_cents();
+            self.current.tick_history.push(MarketTick {
+                timestamp_ms:           now.timestamp_millis(),
+                official_bitcoin_price: off_price,
+                approx_bitcoin_price:   app_price,
+                market_mid_cents:       self.current.orderbook.get_mid_cents(),
+                orderbook:              self.current.orderbook.clone()
+            });
         }
 
         // 4. Render UI
@@ -237,8 +273,8 @@ impl eframe::App for KalshiApp
             });
         });
 
-        // 5. Force the loop to continue
-        ctx.request_repaint_after(Duration::from_millis(25));
+        // 5. Force the loop to continue at a low heartbeat for timers
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
 
@@ -257,52 +293,6 @@ fn main() -> eframe::Result<()>
         .build()
         .expect("Failed to construct tokio runtime");
 
-    let _guard = rt.enter();
-
-    let (next, current, previous) = rt.block_on(async {
-        let PreviousCurrentAndNextMarkets {
-            next_market,
-            current_market,
-            previous_market
-        } = poll_previous_current_and_next_market(&Client::new(), Utc::now()).await;
-
-        let next = MarketBundle::new(
-            next_market,
-            MarketPollState::FarBeforeActive,
-            api_key_id.clone(),
-            priv_key_path.clone()
-        );
-        let current = MarketBundle::new(
-            current_market,
-            MarketPollState::ActiveLookingForStrike,
-            api_key_id.clone(),
-            priv_key_path.clone()
-        );
-        let previous = MarketBundle::new(
-            previous_market,
-            MarketPollState::ActivelyTryingToResolve,
-            api_key_id.clone(),
-            priv_key_path.clone()
-        );
-
-        (next, current, previous)
-    });
-
-    let bitcoin_price_grabber = BitcoinPriceGrabber::new();
-
-    let app = KalshiApp {
-        rt,
-        next,
-        current,
-        previous,
-        bitcoin_price_grabber,
-        real_bitcoin_price: 0.0,
-        approximated_bitcoin_price: 0.0,
-        api_key_id,
-        priv_key_path,
-        market_fetch_rx: None
-    };
-
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]),
         ..Default::default()
@@ -311,6 +301,56 @@ fn main() -> eframe::Result<()>
     eframe::run_native(
         "Kalshi Terminal",
         options,
-        Box::new(|_cc| Ok(Box::new(app)))
+        Box::new(move |cc| {
+            let ctx = cc.egui_ctx.clone();
+            let _guard = rt.enter();
+
+            let (next, current, previous) = rt.block_on(async {
+                let PreviousCurrentAndNextMarkets {
+                    next_market,
+                    current_market,
+                    previous_market
+                } = poll_previous_current_and_next_market(&Client::new(), Utc::now()).await;
+
+                let next = MarketBundle::new(
+                    next_market,
+                    MarketPollState::FarBeforeActive,
+                    api_key_id.clone(),
+                    priv_key_path.clone(),
+                    ctx.clone()
+                );
+                let current = MarketBundle::new(
+                    current_market,
+                    MarketPollState::ActiveLookingForStrike,
+                    api_key_id.clone(),
+                    priv_key_path.clone(),
+                    ctx.clone()
+                );
+                let previous = MarketBundle::new(
+                    previous_market,
+                    MarketPollState::ActivelyTryingToResolve,
+                    api_key_id.clone(),
+                    priv_key_path.clone(),
+                    ctx.clone()
+                );
+
+                (next, current, previous)
+            });
+
+            let bitcoin_price_grabber = BitcoinPriceGrabber::new(ctx.clone());
+
+            Ok(Box::new(KalshiApp {
+                rt,
+                next,
+                current,
+                previous,
+                bitcoin_price_grabber,
+                real_bitcoin_price: 0.0,
+                approximated_bitcoin_price: 0.0,
+                api_key_id,
+                priv_key_path,
+                market_fetch_rx: None
+            }))
+        })
     )
 }

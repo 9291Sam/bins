@@ -1,16 +1,10 @@
 use std::borrow::Cow;
 
+use chrono::{DateTime, Utc};
 use egui::{Color32, Grid, RichText, Ui};
 use egui_plot::{HLine, Line, Plot};
 
-use crate::shared::{
-    DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE,
-    MARKET_INTERVAL_MINUTES,
-    MARKET_INTERVAL_SECONDS,
-    Orderbook,
-    TickHistory,
-    index_to_dollars
-};
+use crate::shared::{MARKET_INTERVAL_MINUTES, MarketTick, Orderbook, index_to_dollars};
 
 pub enum MarketRenderData<'a>
 {
@@ -22,7 +16,8 @@ pub enum MarketRenderData<'a>
         market_id:                  String,
         time_untill_expiry:         chrono::Duration,
         orderbook:                  Orderbook,
-        tick_history:               &'a TickHistory
+        start_time:                 DateTime<Utc>,
+        tick_history:               &'a [MarketTick]
     },
     Resolving
     {
@@ -30,14 +25,16 @@ pub enum MarketRenderData<'a>
         market_id:         String,
         time_after_expiry: chrono::Duration,
         orderbook:         Orderbook,
-        tick_history:      &'a TickHistory
+        start_time:        DateTime<Utc>,
+        tick_history:      &'a [MarketTick]
     },
     Resolved
     {
         strike_price:        f64,
         final_bitcoin_price: f64,
         market_id:           String,
-        tick_history:        &'a TickHistory
+        start_time:          DateTime<Utc>,
+        tick_history:        &'a [MarketTick]
     }
 }
 
@@ -75,7 +72,23 @@ impl<'a> MarketRenderData<'a>
         }
     }
 
-    pub fn get_tick_history(&'a self) -> &'a TickHistory
+    pub fn get_start_time(&self) -> DateTime<Utc>
+    {
+        match self
+        {
+            MarketRenderData::Active {
+                start_time, ..
+            }
+            | MarketRenderData::Resolving {
+                start_time, ..
+            }
+            | MarketRenderData::Resolved {
+                start_time, ..
+            } => *start_time
+        }
+    }
+
+    pub fn get_tick_history(&'a self) -> &'a [MarketTick]
     {
         match self
         {
@@ -411,6 +424,7 @@ fn render_chart(ui: &mut Ui, data: &MarketRenderData)
 {
     let history = data.get_tick_history();
     let strike = data.get_strike_price();
+    let start_time_ms = data.get_start_time().timestamp_millis();
 
     let mut mid_points = vec![];
     let mut official_points = vec![];
@@ -419,14 +433,12 @@ fn render_chart(ui: &mut Ui, data: &MarketRenderData)
     let mut min_btc = f64::MAX;
     let mut max_btc = f64::MIN;
 
-    for (idx, tick) in history.iter().enumerate()
+    for tick in history.iter()
     {
-        let time_seconds = (idx as f64
-            / (DISCRETE_TIMESTEPS_TO_SAVE_PER_EPISODE
-                .saturating_sub(1)
-                .max(1)) as f64)
-            * MARKET_INTERVAL_SECONDS as f64;
+        // Relative seconds since the market 15 minute block began
+        let time_seconds = (tick.timestamp_ms - start_time_ms) as f64 / 1000.0;
 
+        // O(1) Cache read!
         if let Some(mid) = tick.market_mid_cents
         {
             mid_points.push([time_seconds, mid]);
