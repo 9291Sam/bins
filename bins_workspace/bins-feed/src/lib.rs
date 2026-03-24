@@ -1,10 +1,10 @@
 pub mod bitcoin_price_grabber;
-pub mod bundle;
+pub mod market_bundle;
 pub mod market_reader;
 pub mod rest_communicator;
 
 pub use bitcoin_price_grabber::{BitcoinPriceGrabber, BitcoinPriceUpdate};
-pub use bundle::MarketBundle;
+pub use market_bundle::MarketBundle;
 pub use market_reader::{KalshiMarketReader, MarketPollState, MarketStreamEvent};
 pub use rest_communicator::{
     KalshiMarketDescriptor,

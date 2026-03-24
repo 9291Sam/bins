@@ -66,6 +66,7 @@ pub struct Orderbook
 
 impl Orderbook
 {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Orderbook
     {
         Orderbook {

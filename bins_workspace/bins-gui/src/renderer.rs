@@ -141,20 +141,18 @@ fn render_header(ui: &mut Ui, data: &MarketRenderData)
     ui.group(|ui| {
         ui.set_width(ui.available_width());
 
-        // Terminal Title
         ui.label(
             RichText::new(format!(
                 "Kalshi {} minute terminal | {}",
                 MARKET_INTERVAL_MINUTES,
                 data.get_market_id()
             ))
-            .color(Color32::from_rgb(255, 0, 255)) // Magenta
+            .color(Color32::from_rgb(255, 0, 255))
             .strong()
         );
 
         ui.add_space(4.0);
 
-        // Prices & Delta
         ui.horizontal(|ui| {
             let strike_price_string = format!(
                 "Strike: {}",
