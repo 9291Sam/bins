@@ -29,6 +29,7 @@ impl BitcoinPriceGrabber
     {
         let (price_updates_tx, price_updates_rx) = unbounded_channel();
 
+        // official endpoint
         {
             let price_updates_tx = price_updates_tx.clone();
             let on_update = on_update.clone();
@@ -57,7 +58,10 @@ impl BitcoinPriceGrabber
                             );
                             if fails > MAX_FAILS
                             {
-                                panic!();
+                                panic!(
+                                    "Failed to poll the bitcoin price {} times, panicing!",
+                                    MAX_FAILS
+                                );
                             }
                             tokio::time::sleep(Duration::from_millis((fails + 1) * 2500)).await;
                             continue;
@@ -89,6 +93,7 @@ impl BitcoinPriceGrabber
             });
         }
 
+        // unofficial endpoint
         {
             let price_updates_tx = price_updates_tx.clone();
             let on_update = on_update.clone();

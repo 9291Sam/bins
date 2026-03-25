@@ -146,7 +146,7 @@ impl KalshiMarketReader
                             if web_socket.is_none() {
                                 web_socket = Some(
                                     connect_ws(
-                                        &[ticker.0.clone()],
+                                        std::slice::from_ref(&ticker.0),
                                         &api_key_id,
                                         &priv_key_path
                                     ).await.unwrap()

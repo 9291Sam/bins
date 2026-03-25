@@ -1,7 +1,7 @@
-pub mod bitcoin_price_grabber;
-pub mod market_bundle;
-pub mod market_reader;
-pub mod rest_communicator;
+mod bitcoin_price_grabber;
+mod market_bundle;
+mod market_reader;
+mod rest_communicator;
 
 pub use bitcoin_price_grabber::{BitcoinPriceGrabber, BitcoinPriceUpdate};
 pub use market_bundle::MarketBundle;

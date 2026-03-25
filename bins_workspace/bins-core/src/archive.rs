@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use super::*;
+use crate::*;
 
 #[derive(Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct MarketTick
